@@ -96,11 +96,11 @@ alignment_result * local_ungapped_alignment(string query, string target) {
     debug(best_diag_idx);
     debug(best_score);
     #endif
-    
     // todo: find a better solution for handling local variable
     // todo: find a better way to return results?
-    static alignment_result res = {.best_score = best_score, .best_diagonal = best_diag_idx, .best_cells = best_cells};
-    return &res;
+    alignment_result* res = (alignment_result *)malloc(sizeof(alignment_result));
+    res->best_score = best_score, res->best_diagonal = best_diag_idx, res->best_cells = best_cells;
+    return res;
 }
 
 // this function and local_ungapped_alignment are the same function but only memory usage differs
@@ -144,7 +144,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
                 }
             }
         }
-        // this can be done more efficiently
+        // this can be done more efficiently(?)
         for (int col = 1; col <= q_len; col++) {
             last_row_scores[col] = current_row_scores[col];
         }
@@ -163,12 +163,31 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     return res;
 }
 
+void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose) {
+    clock_t start_clock, end_clock;
+    int number_of_calls = 20;
+    long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
+    for (int i = 0; i < number_of_calls; i++) {
+        start_clock = clock();
+        for (auto &q: queries) {
+            for (auto &t: targets) {
+                alignment_result* res = func(q, t);
+            }
+        }
+        end_clock = clock();
+        long execution_clocks = end_clock - start_clock;
+        maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
+        sum_clocks += execution_clocks;
+        if (verbose) cout << "execution clocks: " << execution_clocks << endl;
+    }
+    debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
+}
 
 int main() {
     vector<string> queries, targets;
     init_input_from_file("TestSamples/queries.txt", queries, false);
-    init_input_from_file("TestSamples/targets2.txt", targets, false);
+    init_input_from_file("TestSamples/targets.txt", targets, true);
 #ifdef DEBUG
     for (auto &query: queries) {
         cout << query << endl;
@@ -179,13 +198,17 @@ int main() {
     }
 #endif
     init_score_matrix();
+    measure_time(queries, targets, &local_ungapped_alignment, false);
+    measure_time(queries, targets, &local_ungapped_alignment_less_memory, false);
 
 #ifdef DEBUG
     // doing alignment only for one pair of qurey and target
-    alignment_result *ret = local_ungapped_alignment_less_memory(queries[0], targets[0]);
-    int lq = queries[0].size(), lt = targets[0].size();
+    string q = queries[0], t = targets[0];
+    alignment_result *res = local_ungapped_alignment_less_memory(q, t);
+    int lq = q.size(), lt = t.size();
+    debug(q); debug(t); debug(res->best_score); debug(res->best_diagonal); cout << endl;
     for (int i = 1; i < lq + lt; i++) {
-        cout << ret->best_cells[i].diagonal_idx << " " << ret->best_cells[i].row << " " << ret->best_cells[i].score << endl;
+        cout << res->best_cells[i].diagonal_idx << " " << res->best_cells[i].row << " " << res->best_cells[i].score << endl;
     }
 #endif
     return 0;
