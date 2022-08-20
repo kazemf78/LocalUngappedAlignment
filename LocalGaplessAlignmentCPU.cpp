@@ -1,6 +1,7 @@
 // remember!
 #include <bits/stdc++.h>
 #include "ScoreMatrix.h"
+#include "LocalGaplessAlignmentCPU.h"
 
 using namespace std;
 
@@ -10,40 +11,6 @@ using namespace std;
 
 // #define DEBUG
 
-
-typedef struct {
-    int row = 0;
-    // diagonal_idx = row - col + L_q (1 <= row <= L_t & 1 <= col <= L_q)
-    // ranges from 1 to L_t + L_q - 1
-    int diagonal_idx; 
-    int score = 0;
-} opt_cell;
-
-typedef struct {
-    int best_score;
-    int best_diagonal;
-    opt_cell* best_cells;
-} alignment_result;
-
-// convert each line of file to a string and adds it to the list
-// if the file "is_fasta", then only even lines would be added
-void init_input_from_file(string filename, vector<string>& results, bool is_fasta_format) {
-    string cur_line;
-    ifstream read_file(filename);
-    
-    if (!is_fasta_format) {
-        while (getline(read_file, cur_line)) {
-            results.push_back(cur_line);
-        }
-    }
-    else {
-        int line_num = 1;
-        while (getline(read_file, cur_line)) {
-            if ((line_num++) % 2 == 0)
-                results.push_back(cur_line);
-        }
-    }
-}
 
 alignment_result * local_ungapped_alignment(string query, string target) {
     int q_len = query.size(), t_len = target.size();
@@ -163,9 +130,8 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     return res;
 }
 
-void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose) {
+void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose, int number_of_calls=20) {
     clock_t start_clock, end_clock;
-    int number_of_calls = 20;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
     for (int i = 0; i < number_of_calls; i++) {
@@ -179,7 +145,7 @@ void measure_time(vector<string> queries, vector<string> targets, function<align
         long execution_clocks = end_clock - start_clock;
         maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
         sum_clocks += execution_clocks;
-        if (verbose) cout << "execution clocks: " << execution_clocks << endl;
+        if (verbose) cout << "execution clocks: " << execution_clocks << endl; // divide by CLOCKS_PER_SEC if actual time is needed
     }
     debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
 }
