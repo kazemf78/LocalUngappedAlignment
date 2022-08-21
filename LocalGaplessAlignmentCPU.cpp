@@ -19,15 +19,14 @@ alignment_result * local_ungapped_alignment(string query, string target) {
     #endif 
     
     int matrix[t_len+1][q_len+1];
-    opt_cell best_cells[q_len + t_len];
+    opt_cell best_cells[q_len + t_len - 1];
 
     // initializations
     for (int i = 0; i <= q_len; i++)
         matrix[0][i] = 0;
     for (int i = 0; i <= t_len; i++)
         matrix[i][0] = 0;
-    for (int i = 0; i < q_len + t_len; i++) {
-        // invalid diagonal_idx for i = 0, but for more readability it was ignored
+    for (int i = 0; i < q_len + t_len - 1; i++) {
         best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
     }
     
@@ -38,7 +37,7 @@ alignment_result * local_ungapped_alignment(string query, string target) {
             // note that score_matrix must have been initialized somewhere before calling get_score
             // todo: maybe we can do sth more clear and still efficient about this preprocessing for get_score
             int current_score = max(0, matrix[row-1][col-1] + get_score(target[row-1], query[col-1]));
-            int current_diagonal = row - col + q_len;
+            int current_diagonal = row - col + q_len - 1;
             matrix[row][col] = current_score;
 
             // holding the best_score overall and for each diagonal
@@ -53,8 +52,8 @@ alignment_result * local_ungapped_alignment(string query, string target) {
         }
     }
     #ifdef DEBUG
-    for (int row = 0; row <= t_len; row++) {
-        for (int col = 0; col <= q_len; col++) {
+    for (int row = 1; row <= t_len; row++) {
+        for (int col = 1; col <= q_len; col++) {
             printf("%2d ", matrix[row][col]);
         }
         cout << endl;
@@ -80,14 +79,13 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     int last_row_scores[q_len+1];
     int current_row_scores[q_len+1];
     // usage of malloc because we will use this array outside of the function stack
-    opt_cell* best_cells = (opt_cell *)malloc(sizeof(opt_cell) * (q_len + t_len));
+    opt_cell* best_cells = (opt_cell *)malloc(sizeof(opt_cell) * (q_len + t_len - 1));
 
     // initializations
     for (int i = 0; i <= q_len; i++)
         last_row_scores[i] = 0;
     current_row_scores[0] = 0;
-    for (int i = 0; i < q_len + t_len; i++) {
-        // invalid diagonal_idx for i = 0, but for more readability it was ignored
+    for (int i = 0; i < q_len + t_len - 1; i++) {
         best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
     }
     
@@ -98,7 +96,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
             // note that score_matrix must have been initialized somewhere before calling get_score
             // todo: maybe we can do sth more clear and still efficient about this preprocessing for get_score
             int current_score = max(0, last_row_scores[col-1] + get_score(target[row-1], query[col-1]));
-            int current_diagonal = row - col + q_len;
+            int current_diagonal = row - col + q_len - 1;
             current_row_scores[col] = current_score;
 
             // holding the best_score overall and for each diagonal
@@ -173,7 +171,7 @@ int main() {
     alignment_result *res = local_ungapped_alignment_less_memory(q, t);
     int lq = q.size(), lt = t.size();
     debug(q); debug(t); debug(res->best_score); debug(res->best_diagonal); cout << endl;
-    for (int i = 1; i < lq + lt; i++) {
+    for (int i = 0; i < lq + lt - 1 ; i++) {
         cout << res->best_cells[i].diagonal_idx << " " << res->best_cells[i].row << " " << res->best_cells[i].score << endl;
     }
 #endif
