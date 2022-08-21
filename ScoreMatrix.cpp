@@ -7,6 +7,7 @@ char num2aa[ALPH_SIZE];
 // todo: do sth better
 int aa2num[(int)'Z' - 'A'];
 int score_matrix[ALPH_SIZE][ALPH_SIZE];
+int score_matrix_flattened[ALPH_SIZE * ALPH_SIZE];
 
 
 // todo: put this matrix in a seperate file!
@@ -49,6 +50,7 @@ void init_score_matrix_from_string(string matrix_string) {
         for (int j = 0; j < ALPH_SIZE; j++) {
             input_string >> temp_score;
             score_matrix[i][j] = temp_score;
+            score_matrix_flattened[i * ALPH_SIZE + j] = temp_score;
         }
     }
 }
