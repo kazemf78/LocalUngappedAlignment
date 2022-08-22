@@ -8,10 +8,21 @@ using namespace std;
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
 
-// #define DEBUG
+#define DEBUG_KERNEL
+
+// the type doesn't actually matter!
+extern __shared__ int shared_memory[];
 
 __constant__ int _aa2num[(int)'Z' - 'A'];
 __constant__ int _score_matrix[ALPH_SIZE * ALPH_SIZE];
+
+__device__ void lock(int* mutex) {
+    while (atomicCAS(mutex, 0, 1) != 0) {}
+}
+
+__device__ void unlock(int* mutex) {
+    atomicExch(mutex, 0);
+}
 
 __global__ void test_kernel_flattened(char* flat_str, int* ids, int num_strs) {
     int index = threadIdx.x;
@@ -89,7 +100,7 @@ void free_strings_on_device_ptr2ptr(char** d_str_ptrs, char** d_temp_strs, int n
     }
 }
 
-__global__ void local_ungapped_alignemnt(
+__global__ void local_ungapped_alignment(
     int aa2num_len,
     int score_matrix_len,
     int rows_memory_len,
@@ -106,11 +117,11 @@ __global__ void local_ungapped_alignemnt(
     // - the block size (or number of threads) equals query size
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
-    // __shared__ int best_score;
-    // __shared__ int best_diag_idx;
-    // the type doesn't actually matter!
-    // todo: make it global maybe
-    extern __shared__ int shared_memory[];
+    // __shared__ int mutex; mutex = 0;
+    __shared__ int best_score;
+    __shared__ int best_diag_idx;
+    best_score = 0;
+    best_diag_idx = -1;
 
     // dynamically divide the whole shared memory for the shared memory variables
     int* aa2num = (int *)shared_memory;
@@ -141,11 +152,8 @@ __global__ void local_ungapped_alignemnt(
         }
     }
 
-    // sth to make it branchless :(
-    // maybe we shouldn't store (q_len + 1) cells of rows but in that case we would probably have to have a branch
-    last_row[0] = 0;
-    // Note: thread with index i works on column i+1 of alignment matrix
-    last_row[tid + 1] = 0;
+    // Note: thread with index i works on column i+1 of alignment matrix and need column i to compute it
+    last_row[tid] = 0;
     // current row does not need initialization!
     
     q_cache[tid] = query[tid];
@@ -170,19 +178,42 @@ __global__ void local_ungapped_alignemnt(
     __syncthreads();
 
     // now actual alignment algorithm can begin :D
-
-    // ignore these lines!
-#ifdef DEBUG    
-    int cur_str_len = t_len;
-    char* cur_str = (char *)malloc((cur_str_len + 1) * sizeof(char));
-    memcpy(cur_str, t_cache, cur_str_len);
-    // printf("%d\n", t_len);
-    // for(int i = 0; i < t_len; i++)
-    //     printf("%d:%c| ", i, t_cache[i]);
-    // printf("\n");
-    // cur_str[cur_str_len] = '\0';
-    printf("id: %d, length: %d, query: %s, target: %s\n", tid, cur_str_len, query, cur_str);
+    // todo: test the thrust and cuBLAS library and the reduce method for acquiring extermum in an array
+    for (int row = 1; row <= t_len; row++) {
+        // this thread works on column = tid + 1 and q[tid] char
+        int mat_idx = aa2num[int(q_cache[tid] - 'A')] * ALPH_SIZE + aa2num[int(t_cache[row-1] - 'A')];
+        int substitution_score = score_matrix_flat[mat_idx];
+#ifdef DEBUG_KERNEL
+        printf("(r%d%c, c%2d%c)%2d\n", row, t_cache[row-1], tid+1, q_cache[tid], substitution_score);
 #endif
+        int current_score = max(0, last_row[tid] + substitution_score);
+        int current_diagonal = row - tid + q_len - 2; // row - col + q_len - 1
+        current_row[tid+1] = current_score; // there is no race condition here!
+
+        // each thread works on different diagonal (hence cols differ and rows are the same)
+        // so there is no race condition here yet either
+        if (current_score > best_cells[current_diagonal].score) {
+            best_cells[current_diagonal].score = current_score;
+            best_cells[current_diagonal].row = row;
+            // here we have a race condition
+            // todo: try to handle this race condition!
+            // lock(&mutex);
+            if (current_score > best_score) {
+                best_score = current_score;
+                best_diag_idx = current_diagonal;
+            }
+            // unlock(&mutex);
+        }
+        // to reassure that all current_row cells are updated before using them
+        __syncthreads();
+#ifdef DEBUG_KERNEL
+        printf("diag%2d(r%d, c%2d)%2d\n", current_diagonal, row, tid+1, current_score);
+#endif
+        // last_row[0] is already zero and there is no need to update the value
+        last_row[tid+1] = current_row[tid+1];
+        __syncthreads();
+    }
+
 } 
 
 int main() {
@@ -202,8 +233,12 @@ int main() {
     - clean up this mess!
 */
     int max_target_len = 0;
-    for (auto &t: targets)
-        max_target_len = max(max_target_len, (int)t.size());
+    int sum_target_len = 0;
+    for (auto &t: targets) {
+        int temp_len = t.size();
+        max_target_len = max(max_target_len, temp_len);
+        sum_target_len += temp_len;
+    }
     char * q_str = (char *) queries[0].c_str();
     int q_len = queries[0].size();
     char * d_query_str;
@@ -213,8 +248,8 @@ int main() {
     int num_target_strs = targets.size();
     char * d_targets_fstr; int * d_target_indices;
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
-    // test_kernel_flattened<<<1, num_target_strs>>> (d_targets_fstr, d_target_indices, num_target_strs);
 
+    init_score_matrix();
     cudaMemcpyToSymbol(_score_matrix, score_matrix_flattened, SCORE_MATRIX_SIZE * sizeof(int));
     cudaMemcpyToSymbol(_aa2num, aa2num, int('Z' - 'A') * sizeof(int));
     int aa2num_len = int('Z' - 'A');
@@ -231,7 +266,7 @@ int main() {
      + max_diagonal_size * sizeof(opt_cell)
      ;
 
-    local_ungapped_alignemnt<<<num_target_strs, q_len, shared_memory_size>>> (
+    local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
         aa2num_len,
         score_matrix_len,
         rows_memory_len,

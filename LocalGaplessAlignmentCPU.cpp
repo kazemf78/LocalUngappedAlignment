@@ -84,7 +84,8 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     // initializations
     for (int i = 0; i <= q_len; i++)
         last_row_scores[i] = 0;
-    current_row_scores[0] = 0;
+    // redundant operation
+    // current_row_scores[0] = 0;
     for (int i = 0; i < q_len + t_len - 1; i++) {
         best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
     }
@@ -114,7 +115,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
             last_row_scores[col] = current_row_scores[col];
         }
 #ifdef DEBUG
-        for (int col = 0; col <= q_len; col++) {
+        for (int col = 1; col <= q_len; col++) {
             printf("%2d ", current_row_scores[col]);
         }
         cout << endl;
