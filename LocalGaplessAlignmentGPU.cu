@@ -8,7 +8,10 @@ using namespace std;
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
 
-#define DEBUG_KERNEL
+// #define DEBUG_KERNEL
+
+#define REDUCE_ALIGNMENT_RESULT
+// #define USE_LOCK
 
 // the type doesn't actually matter!
 extern __shared__ int shared_memory[];
@@ -117,11 +120,15 @@ __global__ void local_ungapped_alignment(
     // - the block size (or number of threads) equals query size
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
-    // __shared__ int mutex; mutex = 0;
+#if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
+    __shared__ int mutex; mutex = 0;
+#endif
+#if !defined REDUCE_ALIGNMENT_RESULT
     __shared__ int best_score;
     __shared__ int best_diag_idx;
     best_score = 0;
     best_diag_idx = -1;
+#endif
 
     // dynamically divide the whole shared memory for the shared memory variables
     int* aa2num = (int *)shared_memory;
@@ -195,14 +202,19 @@ __global__ void local_ungapped_alignment(
         if (current_score > best_cells[current_diagonal].score) {
             best_cells[current_diagonal].score = current_score;
             best_cells[current_diagonal].row = row;
-            // here we have a race condition
-            // todo: try to handle this race condition!
+            // here we have a race condition to update the best_score and best_diagonal
+#if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
             // lock(&mutex);
+            while (atomicCAS(&mutex, 0, 1) != 0); // lock
             if (current_score > best_score) {
                 best_score = current_score;
                 best_diag_idx = current_diagonal;
             }
+            atomicExch(&mutex, 0); // unlock
             // unlock(&mutex);
+#elif !defined REDUCE_ALIGNMENT_RESULT && !defined USE_LOCK
+            atomicMax(&best_score, current_score);
+#endif
         }
         // to reassure that all current_row cells are updated before using them
         __syncthreads();
@@ -214,7 +226,31 @@ __global__ void local_ungapped_alignment(
         __syncthreads();
     }
 
-} 
+#ifdef REDUCE_ALIGNMENT_RESULT
+    // todo: maybe use arithmatic shift instead of division?
+    for (int i = (diagonal_size + 1) / 2; i > 0; i = (i+1) / 2) {
+        if (tid < i && (tid + i) < diagonal_size) {
+            if (best_cells[tid].score < best_cells[tid + i].score) {
+                best_cells[tid].score = best_cells[tid + i].score;
+                best_cells[tid].row = best_cells[tid + i].row;
+                best_cells[tid].diagonal_idx = best_cells[tid + i].diagonal_idx;
+            }
+        }
+        __syncthreads();
+        if (i == 1)
+            break;
+    }
+    // now best_cells[0] holds the maximum best score
+    #ifdef DEBUG_KERNEL
+        printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d, row:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx, best_cells[0].row);
+    #endif
+#else
+    #ifdef DEBUG_KERNEL
+    printf("end of thread %d, best_socre: %d\n", tid, best_score);
+    #endif
+#endif
+
+}
 
 int main() {
     vector<string> queries, targets;
