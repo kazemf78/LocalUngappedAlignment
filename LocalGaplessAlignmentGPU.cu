@@ -318,21 +318,12 @@ __global__ void local_ungapped_alignment(
     }
 }
 
-int main() {
-    vector<string> queries, targets;
-    init_input_from_file("TestSamples/queries.txt", queries, false);
-    init_input_from_file("TestSamples/targets.txt", targets, true);
-#ifdef DEBUG
-    for (auto &q: queries)
-        debug(q);
-    for (auto &t: targets)
-        cout << t.size() << ": " << t << endl;
-#endif
+void call_kernel(string query, vector<string>& targets) {
 
 /* some todos for more efficiency:
     - merge minor memory transactions
     - use pinned memory
-    - clean up this mess!
+    - clean up more if possible!
 */
     int max_target_len = 0;
     int sum_target_len = 0;
@@ -341,22 +332,24 @@ int main() {
         max_target_len = max(max_target_len, temp_len);
         sum_target_len += temp_len;
     }
-    char * q_str = (char *) queries[0].c_str();
-    int q_len = queries[0].size();
-    char * d_query_str;
+    char * q_str = (char *) query.c_str();
+    int q_len = query.size();
+    int num_target_strs = targets.size();
+
+    // allocate and initialize some necessary variables on device for kernel call
+    char * d_query_str; char * d_targets_fstr; int * d_target_indices; int *best_scores;
     cudaMalloc(&d_query_str, q_len * sizeof(char));
     cudaMemcpy(d_query_str, q_str, q_len * sizeof(char), cudaMemcpyHostToDevice);
-    // flatten method (with c++ string appending)
-    int num_target_strs = targets.size();
-    char * d_targets_fstr; int * d_target_indices;
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
-
-    init_score_matrix();
+    cudaMallocManaged(&best_scores, num_target_strs * sizeof(int));
+    // be sure to have called init_score_matrix() before using score matrix
+    // todo: do sth about this init_score_matrix necessity
     cudaMemcpyToSymbol(_score_matrix, score_matrix_flattened, SCORE_MATRIX_SIZE * sizeof(int));
     cudaMemcpyToSymbol(_aa2num, aa2num, int('Z' - 'A') * sizeof(int));
+
+    // calculating the (maximum) size of different variables which will go on shared-memory
     int aa2num_len = int('Z' - 'A');
     int score_matrix_len = SCORE_MATRIX_SIZE;
-
     int rows_memory_len = 2 * (q_len + 1); // current row + last row
     int q_tmax_len = (max_target_len + q_len);
 #ifdef REDUCE_ON_COLUMNS
@@ -365,16 +358,13 @@ int main() {
     int max_diagonal_size = (max_target_len + q_len - 1);
     int opt_cells_size = max_diagonal_size;
 #endif
-    // calculating shared memory size in bytes
+    // calculating the maximum needed shared-memory size in bytes
     int shared_memory_size = aa2num_len * sizeof(int)
      + score_matrix_len  * sizeof(int)
      + rows_memory_len * sizeof(int)
      + q_tmax_len  * sizeof(char)
      + opt_cells_size * sizeof(opt_cell)
      ;
-
-    int *best_scores;
-    cudaMallocManaged(&best_scores, num_target_strs * sizeof(int));
 
     local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
         aa2num_len,
@@ -394,17 +384,51 @@ int main() {
 #ifdef DEBUG2
     cout << "final scores:" << endl;
     for (int i = 0; i < num_target_strs; i++) {
-        cout << queries[0].substr(0, 10) << "," << targets[i].substr(0, 10);
+        cout << query.substr(0, 10) << "," << targets[i].substr(0, 10);
         printf("(%3d,%3d): %3d\n", q_len, (int)targets[i].size(), best_scores[i]);
         // cout << targets[i].substr(0, 10) << ":" << targets[i].size() << ": " << best_scores[i] << endl;
     }
 #endif
+    // freeing device memory
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
     cudaFree(d_query_str);
     cudaFree(best_scores);
-    
-    // array of pointers to string method
+}
+
+void measure_kernel_time(string query, vector<string> targets, bool verbose, int number_of_calls=20) {
+    clock_t start_clock, end_clock;
+    long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
+
+    for (int i = 0; i < number_of_calls; i++) {
+        start_clock = clock();
+
+        call_kernel(query, targets);
+
+        end_clock = clock();
+
+        long execution_clocks = end_clock - start_clock;
+        maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
+        sum_clocks += execution_clocks;
+        if (verbose) cout << "execution clocks: " << execution_clocks << endl; // divide by CLOCKS_PER_SEC if actual time is needed
+    }
+    debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
+}
+
+int main() {
+    vector<string> queries, targets;
+    init_score_matrix();
+    init_input_from_file("TestSamples/queries.txt", queries, false);
+    init_input_from_file("TestSamples/targets.txt", targets, true);
 #ifdef DEBUG
+    for (auto &q: queries)
+        debug(q);
+    for (auto &t: targets)
+        cout << t.size() << ": " << t << endl;
+#endif
+    measure_kernel_time(queries[1], targets, true, 10);
+    
+#ifdef DEBUG
+    // array of pointers-to-string method
     int num_strs = queries.size();
     char ** d_str_ptrs;
     char ** d_temp_strs;
