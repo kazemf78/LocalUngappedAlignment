@@ -10,9 +10,10 @@ using namespace std;
 
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
-#define DEBUG2
+// #define DEBUG2
 
-// #define REDUCE_ALIGNMENT_RESULT
+// #define REDUCE_ON_COLUMNS
+#define REDUCE_ALIGNMENT_RESULT
 // #define USE_LOCK
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -120,7 +121,7 @@ __global__ void local_ungapped_alignment(
     int score_matrix_len,
     int rows_memory_len,
     int q_tmax_len,
-    int max_diagonal_size,
+    int opt_cells_size,
     char* target_flat_str,
     int* flat_ids,
     char* query,
@@ -130,7 +131,7 @@ __global__ void local_ungapped_alignment(
 
     // assumptions:
     // - the 3rd parameter of kernel call is provided (for dynamic allocation of shared memory)
-    // - the block size (or number of threads) equals query size
+    // - the block size (or number of threads) equals query size ([tnum = q_len = bsize] in code)
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
     __shared__ int best_score; best_score = 0;
@@ -156,7 +157,7 @@ __global__ void local_ungapped_alignment(
        Note2: the size of variables being used here is their actual size not the max size we had to specify for the kernel call
        todo: would be nice if we could free or release the additional space previously reserved but we're not using here */
     opt_cell* best_cells = (opt_cell*)&current_row[q_len + 1];
-    char* q_cache = (char *)&best_cells[q_len + t_len - 1];
+    char* q_cache = (char *)&best_cells[opt_cells_size];
     char* t_cache = (char *)&q_cache[q_len];
     
     // todo: extract a function for this repeated allocations if possible
@@ -188,6 +189,11 @@ __global__ void local_ungapped_alignment(
         }
     }
 
+#ifdef REDUCE_ON_COLUMNS
+    best_cells[tid].row = -1;
+    best_cells[tid].score = -1;
+    best_cells[tid].diagonal_idx = -1;
+#else
     int diagonal_size = t_len + q_len - 1;
     for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
@@ -197,6 +203,7 @@ __global__ void local_ungapped_alignment(
             best_cells[idx].diagonal_idx = idx;
         }
     }
+#endif
 
     __syncthreads();
 
@@ -213,11 +220,18 @@ __global__ void local_ungapped_alignment(
         int current_diagonal = row - tid + q_len - 2; // row - col + q_len - 1
         current_row[tid+1] = current_score; // there is no race condition here!
 
-        // each thread works on different diagonal (hence cols differ and rows are the same)
+        // each thread works on different diagonal or column (considering columns of threads differ and rows are the same)
         // so there is no race condition here yet either
+#ifdef REDUCE_ON_COLUMNS
+        if (current_score > best_cells[tid].score) {
+            best_cells[tid].score = current_score;
+            best_cells[tid].row = row;
+            best_cells[tid].diagonal_idx = current_diagonal;
+#else
         if (current_score > best_cells[current_diagonal].score) {
             best_cells[current_diagonal].score = current_score;
             best_cells[current_diagonal].row = row;
+#endif
             // here we have a race condition to update the best_score and best_diagonal
 #if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
             // lock(&mutex);
@@ -243,7 +257,7 @@ __global__ void local_ungapped_alignment(
     }
 
 #ifdef REDUCE_ALIGNMENT_RESULT
-    #ifdef DEBUG_REDUCE
+    #if defined DEBUG_REDUCE & !defined REDUCE_ON_COLUMNS
     if (!tid) {
         printf("before reduction:\n");
         for (int i = 0; i < diagonal_size; i++) {
@@ -252,6 +266,7 @@ __global__ void local_ungapped_alignment(
     }
     #endif
 
+    #if !defined REDUCE_ON_COLUMNS
     // this whole reduction on diagonals complexity time is not o(logn) but it's o(Lt/Lq) + o(logn)
     for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
@@ -261,6 +276,8 @@ __global__ void local_ungapped_alignment(
             best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
         }
     }
+    #endif
+
     for (int i = (tnum + 1) / 2; i > 0; i = (i+1) / 2) {
         int idx = tid + i;
         if (tid < i && idx < tnum) {
@@ -342,13 +359,18 @@ int main() {
 
     int rows_memory_len = 2 * (q_len + 1); // current row + last row
     int q_tmax_len = (max_target_len + q_len);
+#ifdef REDUCE_ON_COLUMNS
+    int opt_cells_size = q_len; // column_size
+#else
     int max_diagonal_size = (max_target_len + q_len - 1);
+    int opt_cells_size = max_diagonal_size;
+#endif
     // calculating shared memory size in bytes
     int shared_memory_size = aa2num_len * sizeof(int)
-     + score_matrix_len  * sizeof(int) 
+     + score_matrix_len  * sizeof(int)
      + rows_memory_len * sizeof(int)
-     + q_tmax_len  * sizeof(char) 
-     + max_diagonal_size * sizeof(opt_cell)
+     + q_tmax_len  * sizeof(char)
+     + opt_cells_size * sizeof(opt_cell)
      ;
 
     int *best_scores;
@@ -359,7 +381,7 @@ int main() {
         score_matrix_len,
         rows_memory_len,
         q_tmax_len,
-        max_diagonal_size,
+        opt_cells_size,
         d_targets_fstr,
         d_target_indices,
         d_query_str,
@@ -371,8 +393,11 @@ int main() {
     // cudaDeviceSynchronize();
 #ifdef DEBUG2
     cout << "final scores:" << endl;
-    for (int i = 0; i < num_target_strs; i++)
-        cout << targets[i].substr(0, 10) << ":" << targets[i].size() << ": " << best_scores[i] << endl;
+    for (int i = 0; i < num_target_strs; i++) {
+        cout << queries[0].substr(0, 10) << "," << targets[i].substr(0, 10);
+        printf("(%3d,%3d): %3d\n", q_len, (int)targets[i].size(), best_scores[i]);
+        // cout << targets[i].substr(0, 10) << ":" << targets[i].size() << ": " << best_scores[i] << endl;
+    }
 #endif
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
     cudaFree(d_query_str);
