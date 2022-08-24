@@ -8,10 +8,22 @@ using namespace std;
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
 
+// #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
+#define DEBUG2
 
-#define REDUCE_ALIGNMENT_RESULT
+// #define REDUCE_ALIGNMENT_RESULT
 // #define USE_LOCK
+
+#define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess)
+   {
+      fprintf(stderr,"GPUassert: %s %s %d\n", cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
 
 // the type doesn't actually matter!
 extern __shared__ int shared_memory[];
@@ -112,7 +124,8 @@ __global__ void local_ungapped_alignment(
     char* target_flat_str,
     int* flat_ids,
     char* query,
-    int q_len
+    int q_len,
+    int* best_scores
 ) {
 
     // assumptions:
@@ -120,15 +133,17 @@ __global__ void local_ungapped_alignment(
     // - the block size (or number of threads) equals query size
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
+    __shared__ int best_score; best_score = 0;
 #if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
     __shared__ int mutex; mutex = 0;
 #endif
 #if !defined REDUCE_ALIGNMENT_RESULT
-    __shared__ int best_score;
-    __shared__ int best_diag_idx;
-    best_score = 0;
-    best_diag_idx = -1;
+    // __shared__ int best_diag_idx; best_diag_idx = -1;
 #endif
+    // some preprocessing of variables (these would go on registers probably)
+    int bid = blockIdx.x; int tid =  threadIdx.x; int bsize = blockDim.x; int tnum = bsize;
+    int t_start_idx = flat_ids[bid];
+    int t_len = flat_ids[bid + 1] - t_start_idx;
 
     // dynamically divide the whole shared memory for the shared memory variables
     int* aa2num = (int *)shared_memory;
@@ -136,12 +151,13 @@ __global__ void local_ungapped_alignment(
     // rows_memory_len = 2 * (q_len + 1)
     int* last_row = (int *)&score_matrix_flat[score_matrix_len];
     int* current_row = (int *)&last_row[q_len + 1];
-    char* q_tmax = (char *)&current_row[q_len + 1];
-    char* q_cache = q_tmax;
-    char* t_cache = (char *)&q_tmax[q_len];
-    opt_cell* best_cells = (opt_cell*)&t_cache[q_tmax_len];
-
-    int bid = blockIdx.x; int tid =  threadIdx.x; int bsize = blockDim.x; int tnum = bsize;
+    /* Note1: the order of these allocations actually matters and if not considered the "misaligned address" error can occur
+        for example cuda needs that int* pointers, point to addresses aligned with 32 bytes and if we allocate the char* before int* it's probable this error occurs
+       Note2: the size of variables being used here is their actual size not the max size we had to specify for the kernel call
+       todo: would be nice if we could free or release the additional space previously reserved but we're not using here */
+    opt_cell* best_cells = (opt_cell*)&current_row[q_len + 1];
+    char* q_cache = (char *)&best_cells[q_len + t_len - 1];
+    char* t_cache = (char *)&q_cache[q_len];
     
     // todo: extract a function for this repeated allocations if possible
     // initialize and retrieve content of shared memory variables
@@ -165,8 +181,6 @@ __global__ void local_ungapped_alignment(
     
     q_cache[tid] = query[tid];
 
-    int t_start_idx = flat_ids[bid];
-    int t_len = flat_ids[bid + 1] - t_start_idx;
     for (int i = 0; i < (t_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < t_len) {
@@ -178,7 +192,9 @@ __global__ void local_ungapped_alignment(
     for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < diagonal_size) {
-            best_cells[idx].row = -1, best_cells[idx].score = -1, best_cells[idx].diagonal_idx = idx;
+            best_cells[idx].row = -1;
+            best_cells[idx].score = -1;
+            best_cells[idx].diagonal_idx = idx;
         }
     }
 
@@ -227,35 +243,68 @@ __global__ void local_ungapped_alignment(
     }
 
 #ifdef REDUCE_ALIGNMENT_RESULT
-    // todo: maybe use arithmatic shift instead of division?
-    for (int i = (diagonal_size + 1) / 2; i > 0; i = (i+1) / 2) {
-        if (tid < i && (tid + i) < diagonal_size) {
-            if (best_cells[tid].score < best_cells[tid + i].score) {
-                best_cells[tid].score = best_cells[tid + i].score;
-                best_cells[tid].row = best_cells[tid + i].row;
-                best_cells[tid].diagonal_idx = best_cells[tid + i].diagonal_idx;
+    #ifdef DEBUG_REDUCE
+    if (!tid) {
+        printf("before reduction:\n");
+        for (int i = 0; i < diagonal_size; i++) {
+            printf("row:%d, score:%d, idx:%d\n", best_cells[i].row, best_cells[i].score, best_cells[i].diagonal_idx);
+        }
+    }
+    #endif
+
+    // this whole reduction on diagonals complexity time is not o(logn) but it's o(Lt/Lq) + o(logn)
+    for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < diagonal_size && best_cells[tid].score < best_cells[idx].score) {
+            best_cells[tid].row = best_cells[idx].row;
+            best_cells[tid].score = best_cells[idx].score;
+            best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
+        }
+    }
+    for (int i = (tnum + 1) / 2; i > 0; i = (i+1) / 2) {
+        int idx = tid + i;
+        if (tid < i && idx < tnum) {
+    #ifdef DEBUG_REDUCE
+            printf("(tid:%d, idx:%d| cur_size:%d block_size:%d)\n", tid, idx, i, tnum);
+    #endif
+            if (best_cells[tid].score < best_cells[idx].score) {
+                best_cells[tid].score = best_cells[idx].score;
+                best_cells[tid].row = best_cells[idx].row;
+                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
             }
         }
         __syncthreads();
+    #ifdef DEBUG_REDUCE
+        if (!tid) for (int j = 0; j < i; j++) {
+            printf("row:%d, score:%d, idx:%d\n", best_cells[j].row, best_cells[j].score, best_cells[j].diagonal_idx);
+        }
+    #endif
         if (i == 1)
             break;
     }
+    best_score = best_cells[0].score;
     // now best_cells[0] holds the maximum best score
-    #ifdef DEBUG_KERNEL
+    #ifdef DEBUG_REDUCE
         printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d, row:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx, best_cells[0].row);
     #endif
 #else
     #ifdef DEBUG_KERNEL
-    printf("end of thread %d, best_socre: %d\n", tid, best_score);
+    printf("end of thread %d, best_score: %d\n", tid, best_score);
     #endif
 #endif
 
+    if (!tid) {
+#if defined REDUCE_ALIGNMENT_RESULT && defined DEBUG_REDUCE
+        printf("%d, bid:%d, best_score:%d, row: %d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].row, best_cells[0].diagonal_idx);
+#endif
+        best_scores[bid] = best_score;
+    }
 }
 
 int main() {
     vector<string> queries, targets;
     init_input_from_file("TestSamples/queries.txt", queries, false);
-    init_input_from_file("TestSamples/targets2.txt", targets, false);
+    init_input_from_file("TestSamples/targets.txt", targets, true);
 #ifdef DEBUG
     for (auto &q: queries)
         debug(q);
@@ -302,6 +351,9 @@ int main() {
      + max_diagonal_size * sizeof(opt_cell)
      ;
 
+    int *best_scores;
+    cudaMallocManaged(&best_scores, num_target_strs * sizeof(int));
+
     local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
         aa2num_len,
         score_matrix_len,
@@ -311,11 +363,20 @@ int main() {
         d_targets_fstr,
         d_target_indices,
         d_query_str,
-        q_len
+        q_len,
+        best_scores
     );
-    cudaDeviceSynchronize();
+    gpuErrchk(cudaPeekAtLastError());
+    gpuErrchk(cudaDeviceSynchronize());
+    // cudaDeviceSynchronize();
+#ifdef DEBUG2
+    cout << "final scores:" << endl;
+    for (int i = 0; i < num_target_strs; i++)
+        cout << targets[i].substr(0, 10) << ":" << targets[i].size() << ": " << best_scores[i] << endl;
+#endif
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
     cudaFree(d_query_str);
+    cudaFree(best_scores);
     
     // array of pointers to string method
 #ifdef DEBUG
