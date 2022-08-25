@@ -40,23 +40,6 @@ __device__ void unlock(int* mutex) {
     atomicExch(mutex, 0);
 }
 
-__global__ void test_kernel_flattened(char* flat_str, int* ids, int num_strs) {
-    int index = threadIdx.x;
-    int cur_str_len = ids[index+1] - ids[index];
-    char* cur_str = (char *)malloc((cur_str_len + 1) * sizeof(char));
-    memcpy(cur_str, flat_str + ids[index], cur_str_len);
-    cur_str[cur_str_len] = '\0';
-    printf("length: %d, string: %s\n", cur_str_len, cur_str);
-}
-
-__global__ void test_kernel_ptr2ptr(char** str_ptrs, int num_strings) {
-
-    int index = threadIdx.x;
-    // char* cur_str = str_ptrs[index];
-    if (index < num_strings)
-        printf("index: %d, num_strings: %d, string: %s\n", index, num_strings, str_ptrs[index]);
-}
-
 void allcoate_strings_on_device_flattened(vector<string> strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
     string flat_temp; int* flat_ids; char * flat_str;
     flat_ids = (int *) malloc((num_strs + 1) * sizeof(int));
@@ -81,19 +64,6 @@ void allcoate_strings_on_device_flattened(vector<string> strings, char ** d_fstr
 void free_strings_on_device_flattened(char* d_fstr, int* d_fids) {
     cudaFree(d_fstr);
     cudaFree(d_fids);
-}
-
-char ** allocate_device_ptr2ptr_without_free(vector<string> strings, int num_strs) {
-    char ** d_str_ptrs;
-    cudaMalloc(&d_str_ptrs, num_strs * sizeof(char *));
-    char * d_temp_strs[num_strs];
-    for (int i = 0; i < num_strs; i++) {
-        int q_i_len = strings[i].size();
-        cudaMalloc(&d_temp_strs[i],  q_i_len * sizeof(char));
-        cudaMemcpy(d_temp_strs[i], strings[i].c_str(), q_i_len * sizeof(char), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_str_ptrs + i, &d_temp_strs[i], sizeof(char *), cudaMemcpyHostToDevice);
-    }
-    return d_str_ptrs;
 }
 
 void allocate_strings_on_device_ptr2ptr(vector<string> strings, char *** d_str_ptrs_addr, char *** d_temp_strs_addr, int num_strs) {
@@ -125,6 +95,7 @@ __global__ void local_ungapped_alignment(
     char* target_flat_str,
     int* flat_ids,
     char* query,
+    // char* query_idx,
     int q_len,
     int* best_scores
 ) {
@@ -181,6 +152,7 @@ __global__ void local_ungapped_alignment(
     // current row does not need initialization!
     
     q_cache[tid] = query[tid];
+    // q_cache[tid] = query_idx[tid];
 
     for (int i = 0; i < (t_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
@@ -211,6 +183,8 @@ __global__ void local_ungapped_alignment(
     // todo: test the thrust and cuBLAS library and the reduce method for acquiring extermum in an array
     for (int row = 1; row <= t_len; row++) {
         // this thread works on column = tid + 1 and q[tid] char
+        // int char_idx = (int) q_cache[tid];
+        // int mat_idx = char_idx * ALPH_SIZE + aa2num[int(t_cache[row-1] - 'A')];
         int mat_idx = aa2num[int(q_cache[tid] - 'A')] * ALPH_SIZE + aa2num[int(t_cache[row-1] - 'A')];
         int substitution_score = score_matrix_flat[mat_idx];
 #ifdef DEBUG_KERNEL
@@ -334,12 +308,21 @@ void call_kernel(string query, vector<string>& targets) {
     }
     char * q_str = (char *) query.c_str();
     int q_len = query.size();
+    // convert query to its indexes on aa2num
+    // char * q_str_idx = (char *)malloc(q_len * sizeof(char));
+    // for (int i = 0; i < q_len; i++) {
+    //     q_str_idx[i] = (char)aa2num[q_str[i] - 'A'];
+    // }
     int num_target_strs = targets.size();
 
     // allocate and initialize some necessary variables on device for kernel call
     char * d_query_str; char * d_targets_fstr; int * d_target_indices; int *best_scores;
     cudaMalloc(&d_query_str, q_len * sizeof(char));
     cudaMemcpy(d_query_str, q_str, q_len * sizeof(char), cudaMemcpyHostToDevice);
+
+    // char * d_query_str_idx; char * d_targets_fstr; int * d_target_indices; int *best_scores;
+    // cudaMalloc(&d_query_str_idx, q_len * sizeof(char));
+    // cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
     cudaMallocManaged(&best_scores, num_target_strs * sizeof(int));
     // be sure to have called init_score_matrix() before using score matrix
@@ -375,6 +358,7 @@ void call_kernel(string query, vector<string>& targets) {
         d_targets_fstr,
         d_target_indices,
         d_query_str,
+        // d_query_str_idx,
         q_len,
         best_scores
     );
@@ -392,6 +376,7 @@ void call_kernel(string query, vector<string>& targets) {
     // freeing device memory
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
     cudaFree(d_query_str);
+    // cudaFree(d_query_str_idx);
     cudaFree(best_scores);
 }
 
@@ -414,11 +399,18 @@ void measure_kernel_time(string query, vector<string> targets, bool verbose, int
     debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
 }
 
-int main() {
+int main(int argc, char** argv) {
     vector<string> queries, targets;
     init_score_matrix();
     init_input_from_file("TestSamples/queries.txt", queries, false);
-    init_input_from_file("TestSamples/targets.txt", targets, true);
+    // the only option right now is to provide the target fasta file!
+    string target_path = "TestSamples/targets.txt";
+    bool is_fasta = true;
+    if (argc > 1) {
+        target_path = argv[1];
+    }
+    init_input_from_file(target_path, targets, is_fasta);
+
 #ifdef DEBUG
     for (auto &q: queries)
         debug(q);
@@ -427,15 +419,5 @@ int main() {
 #endif
     measure_kernel_time(queries[1], targets, true, 10);
     
-#ifdef DEBUG
-    // array of pointers-to-string method
-    int num_strs = queries.size();
-    char ** d_str_ptrs;
-    char ** d_temp_strs;
-    allocate_strings_on_device_ptr2ptr(queries, &d_str_ptrs, &d_temp_strs, num_strs);
-    test_kernel_ptr2ptr<<<1, num_strs>>> (d_str_ptrs, num_strs);
-    cudaDeviceSynchronize();
-    free_strings_on_device_ptr2ptr(d_str_ptrs, d_temp_strs, num_strs);
-#endif
     return 0;
 }
