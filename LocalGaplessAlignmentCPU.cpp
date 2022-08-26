@@ -1,6 +1,7 @@
 // remember!
 #include <bits/stdc++.h>
 #include "ScoreMatrix.h"
+#include "LocalGaplessAlignmentCPU.h"
 
 using namespace std;
 
@@ -11,40 +12,6 @@ using namespace std;
 // #define DEBUG
 
 
-typedef struct {
-    int row = 0;
-    // diagonal_idx = row - col + L_q (1 <= row <= L_t & 1 <= col <= L_q)
-    // ranges from 1 to L_t + L_q - 1
-    int diagonal_idx; 
-    int score = 0;
-} opt_cell;
-
-typedef struct {
-    int best_score;
-    int best_diagonal;
-    opt_cell* best_cells;
-} alignment_result;
-
-// convert each line of file to a string and adds it to the list
-// if the file "is_fasta", then only even lines would be added
-void init_input_from_file(string filename, vector<string>& results, bool is_fasta_format) {
-    string cur_line;
-    ifstream read_file(filename);
-    
-    if (!is_fasta_format) {
-        while (getline(read_file, cur_line)) {
-            results.push_back(cur_line);
-        }
-    }
-    else {
-        int line_num = 1;
-        while (getline(read_file, cur_line)) {
-            if ((line_num++) % 2 == 0)
-                results.push_back(cur_line);
-        }
-    }
-}
-
 alignment_result * local_ungapped_alignment(string query, string target) {
     int q_len = query.size(), t_len = target.size();
     #ifdef DEBUG
@@ -52,15 +19,14 @@ alignment_result * local_ungapped_alignment(string query, string target) {
     #endif 
     
     int matrix[t_len+1][q_len+1];
-    opt_cell best_cells[q_len + t_len];
+    opt_cell best_cells[q_len + t_len - 1];
 
     // initializations
     for (int i = 0; i <= q_len; i++)
         matrix[0][i] = 0;
     for (int i = 0; i <= t_len; i++)
         matrix[i][0] = 0;
-    for (int i = 0; i < q_len + t_len; i++) {
-        // invalid diagonal_idx for i = 0, but for more readability it was ignored
+    for (int i = 0; i < q_len + t_len - 1; i++) {
         best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
     }
     
@@ -71,7 +37,7 @@ alignment_result * local_ungapped_alignment(string query, string target) {
             // note that score_matrix must have been initialized somewhere before calling get_score
             // todo: maybe we can do sth more clear and still efficient about this preprocessing for get_score
             int current_score = max(0, matrix[row-1][col-1] + get_score(target[row-1], query[col-1]));
-            int current_diagonal = row - col + q_len;
+            int current_diagonal = row - col + q_len - 1;
             matrix[row][col] = current_score;
 
             // holding the best_score overall and for each diagonal
@@ -86,8 +52,8 @@ alignment_result * local_ungapped_alignment(string query, string target) {
         }
     }
     #ifdef DEBUG
-    for (int row = 0; row <= t_len; row++) {
-        for (int col = 0; col <= q_len; col++) {
+    for (int row = 1; row <= t_len; row++) {
+        for (int col = 1; col <= q_len; col++) {
             printf("%2d ", matrix[row][col]);
         }
         cout << endl;
@@ -113,14 +79,14 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     int last_row_scores[q_len+1];
     int current_row_scores[q_len+1];
     // usage of malloc because we will use this array outside of the function stack
-    opt_cell* best_cells = (opt_cell *)malloc(sizeof(opt_cell) * (q_len + t_len));
+    opt_cell* best_cells = (opt_cell *)malloc(sizeof(opt_cell) * (q_len + t_len - 1));
 
     // initializations
     for (int i = 0; i <= q_len; i++)
         last_row_scores[i] = 0;
-    current_row_scores[0] = 0;
-    for (int i = 0; i < q_len + t_len; i++) {
-        // invalid diagonal_idx for i = 0, but for more readability it was ignored
+    // redundant operation
+    // current_row_scores[0] = 0;
+    for (int i = 0; i < q_len + t_len - 1; i++) {
         best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
     }
     
@@ -131,7 +97,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
             // note that score_matrix must have been initialized somewhere before calling get_score
             // todo: maybe we can do sth more clear and still efficient about this preprocessing for get_score
             int current_score = max(0, last_row_scores[col-1] + get_score(target[row-1], query[col-1]));
-            int current_diagonal = row - col + q_len;
+            int current_diagonal = row - col + q_len - 1;
             current_row_scores[col] = current_score;
 
             // holding the best_score overall and for each diagonal
@@ -149,7 +115,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
             last_row_scores[col] = current_row_scores[col];
         }
 #ifdef DEBUG
-        for (int col = 0; col <= q_len; col++) {
+        for (int col = 1; col <= q_len; col++) {
             printf("%2d ", current_row_scores[col]);
         }
         cout << endl;
@@ -163,9 +129,8 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     return res;
 }
 
-void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose) {
+void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose, int number_of_calls=20) {
     clock_t start_clock, end_clock;
-    int number_of_calls = 20;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
     for (int i = 0; i < number_of_calls; i++) {
@@ -179,7 +144,7 @@ void measure_time(vector<string> queries, vector<string> targets, function<align
         long execution_clocks = end_clock - start_clock;
         maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
         sum_clocks += execution_clocks;
-        if (verbose) cout << "execution clocks: " << execution_clocks << endl;
+        if (verbose) cout << "execution clocks: " << execution_clocks << endl; // divide by CLOCKS_PER_SEC if actual time is needed
     }
     debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
 }
@@ -207,7 +172,7 @@ int main() {
     alignment_result *res = local_ungapped_alignment_less_memory(q, t);
     int lq = q.size(), lt = t.size();
     debug(q); debug(t); debug(res->best_score); debug(res->best_diagonal); cout << endl;
-    for (int i = 1; i < lq + lt; i++) {
+    for (int i = 0; i < lq + lt - 1 ; i++) {
         cout << res->best_cells[i].diagonal_idx << " " << res->best_cells[i].row << " " << res->best_cells[i].score << endl;
     }
 #endif
