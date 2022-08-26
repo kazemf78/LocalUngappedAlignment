@@ -27,7 +27,8 @@ alignment_result * local_ungapped_alignment(string query, string target) {
     for (int i = 0; i <= t_len; i++)
         matrix[i][0] = 0;
     for (int i = 0; i < q_len + t_len - 1; i++) {
-        best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
+        // best_cells[i].row = 0,
+        best_cells[i].score = 0, best_cells[i].diagonal_idx = i;
     }
     
     int best_score = 0;
@@ -43,7 +44,7 @@ alignment_result * local_ungapped_alignment(string query, string target) {
             // holding the best_score overall and for each diagonal
             if (current_score > best_cells[current_diagonal].score) {
                 best_cells[current_diagonal].score = current_score;
-                best_cells[current_diagonal].row = row;
+                // best_cells[current_diagonal].row = row;
                 if (current_score > best_score) {
                     best_score = current_score;
                     best_diag_idx = current_diagonal;
@@ -87,10 +88,11 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     // redundant operation
     // current_row_scores[0] = 0;
     for (int i = 0; i < q_len + t_len - 1; i++) {
-        best_cells[i].row = -1, best_cells[i].score = -1, best_cells[i].diagonal_idx = i;
+        // best_cells[i].row = 0,
+        best_cells[i].score = 0, best_cells[i].diagonal_idx = i;
     }
     
-    int best_score = -1;
+    int best_score = 0;
     int best_diag_idx = -1;
     for (int row = 1; row <= t_len; row++) {
         for (int col = 1; col <= q_len; col++) {
@@ -103,7 +105,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
             // holding the best_score overall and for each diagonal
             if (current_score > best_cells[current_diagonal].score) {
                 best_cells[current_diagonal].score = current_score;
-                best_cells[current_diagonal].row = row;
+                // best_cells[current_diagonal].row = row;
                 if (current_score > best_score) {
                     best_score = current_score;
                     best_diag_idx = current_diagonal;
@@ -166,15 +168,15 @@ int main() {
     measure_time(queries, targets, &local_ungapped_alignment, false);
     measure_time(queries, targets, &local_ungapped_alignment_less_memory, false);
 
-#ifdef DEBUG
-    // doing alignment only for one pair of qurey and target
-    string q = queries[0], t = targets[0];
-    alignment_result *res = local_ungapped_alignment_less_memory(q, t);
-    int lq = q.size(), lt = t.size();
-    debug(q); debug(t); debug(res->best_score); debug(res->best_diagonal); cout << endl;
-    for (int i = 0; i < lq + lt - 1 ; i++) {
-        cout << res->best_cells[i].diagonal_idx << " " << res->best_cells[i].row << " " << res->best_cells[i].score << endl;
-    }
+#ifdef DEBUG2
+    string q = queries[0];
+    for (auto &t: targets) {
+        alignment_result *res = local_ungapped_alignment_less_memory(q, t);
+        int lq = q.size(), lt = t.size();
+        // cout << q << ", length: " << t.size() << ", row: " << res->best_cells[res->best_diagonal].row <<  ", diag: " << res->best_diagonal << " "; debug(res->best_score); //debug(res->best_diagonal); cout << endl;
+        // cout << t.substr(0, 10) << ":" << t.size() << ": " << res->best_cells[res->best_diagonal].row <<  ", diag: " << res->best_diagonal << " "; debug(res->best_score);
+        cout << t.substr(0, 10) << ":" << t.size() << ": " << res->best_score << endl;
+     }
 #endif
     return 0;
 }
