@@ -3,11 +3,11 @@
 
 using namespace std;
 
-char num2aa[ALPH_SIZE];
+byte_type num2aa[ALPH_SIZE];
 // todo: do sth better
-int aa2num[(int)'Z' - 'A'];
-int score_matrix[ALPH_SIZE][ALPH_SIZE];
-int score_matrix_flattened[ALPH_SIZE * ALPH_SIZE];
+byte_type aa2num['Z' - 'A'];
+byte_type score_matrix[ALPH_SIZE][ALPH_SIZE];
+byte_type score_matrix_flattened[ALPH_SIZE * ALPH_SIZE];
 
 
 // todo: put this matrix in a seperate file!
@@ -42,7 +42,7 @@ void init_score_matrix_from_string(string matrix_string) {
     for (int i = 0; i < ALPH_SIZE; i++) {
         input_string >> single_token;
         num2aa[i] = single_token;
-        aa2num[(int) single_token - 'A'] = i;
+        aa2num[single_token - 'A'] = i;
     }
     for (int i = 0; i < ALPH_SIZE; i++) {
         input_string >> single_token;
@@ -61,6 +61,6 @@ void init_score_matrix() {
 
 int get_score(char before, char after) {
     // todo: dirty code
-    int score = score_matrix[aa2num[(int)before - 'A']][aa2num[(int) after - 'A']];
+    int score = score_matrix[aa2num[before - 'A']][aa2num[after - 'A']];
     return score;
 }
