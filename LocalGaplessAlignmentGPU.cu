@@ -106,7 +106,7 @@ __global__ void local_ungapped_alignment(
     // - the block size (or number of threads) equals query size ([tnum = q_len = bsize] in code)
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
-    __shared__ int_type best_score; best_score = 0;
+    __shared__ int best_score; best_score = 0;
 #if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
     __shared__ int mutex; mutex = 0;
 #endif
@@ -278,7 +278,8 @@ __global__ void local_ungapped_alignment(
     best_score = best_cells[0].score;
     // now best_cells[0] holds the maximum best score
     #ifdef DEBUG_REDUCE
-        printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d, row:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx, best_cells[0].row);
+        printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx);
+        // printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d, row:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx, best_cells[0].row);
     #endif
 #else
     #ifdef DEBUG_KERNEL
@@ -295,7 +296,152 @@ __global__ void local_ungapped_alignment(
     }
 }
 
-void call_kernel(string query, vector<string>& targets) {
+__global__ void local_ungapped_alignment_on_diagonal(
+    int aa2num_len,
+    int score_matrix_len,
+    int q_tmax_len,
+#ifdef REDUCE_ALIGNMENT_RESULT
+    int opt_cells_size,
+#endif
+    char* target_flat_str,
+    int* flat_ids,
+    char* query,
+    int q_len,
+    int_type* best_scores
+) {
+
+    // assumptions:
+    // - the 3rd parameter of kernel call is provided (for dynamic allocation of shared memory)
+    // - the block size (or number of threads) equals mx=max(Lq, max{Lt})
+    // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
+    // - thread with "tid" works on diagonal_idx of tid and maybe mx + tid
+    // - starting cell of diagonal_idx "did" is (row=max(1, did - Lq + 2), col=max(1, Lq - did)) [reminder: row-> [1, Lt], col-> [1, Lq], diag_idx-> [0, Lt+Lq-1)]
+    __shared__ int best_overall_score; best_overall_score = 0;
+    // some preprocessing of variables (these would go on registers probably)
+    int bid = blockIdx.x; int tid =  threadIdx.x; int bsize = blockDim.x; int tnum = bsize;
+    int t_start_idx = flat_ids[bid];
+    int t_len = flat_ids[bid + 1] - t_start_idx;
+    int diagonal_size = t_len + q_len - 1;
+    int actual_tnum = max(t_len, q_len);
+
+    // dynamically divide the whole shared memory for the shared memory variables
+    byte_type* aa2num = (byte_type *)shared_memory;
+    byte_type* score_matrix_flat = (byte_type *)&aa2num[aa2num_len];
+#ifdef REDUCE_ALIGNMENT_RESULT
+    opt_cell* best_cells = (opt_cell*)&score_matrix_flat[score_matrix_len];
+    char* q_cache = (char *)&best_cells[opt_cells_size];
+    char* t_cache = (char *)&q_cache[q_len];
+#else
+    char* q_cache = (char *)&score_matrix_flat[score_matrix_len];
+    char* t_cache = (char *)&q_cache[q_len];
+#endif
+
+    // todo: extract a function for this repeated allocations if possible
+    // initialize and retrieve content of shared memory variables
+    for (int i = 0; i < (aa2num_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < aa2num_len) {
+            aa2num[idx] = _aa2num[idx];
+        }
+    }
+
+    for (int i = 0; i < (score_matrix_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < score_matrix_len) {
+            score_matrix_flat[idx] = _score_matrix[idx];
+        }
+    }
+
+    q_cache[min(tid, q_len-1)] = query[min(tid, q_len-1)];
+    t_cache[min(tid, t_len-1)] = target_flat_str[min(tid, t_len-1) + t_start_idx];
+
+    __syncthreads();
+
+    // now actual alignment algorithm can begin :D
+    int diag_idx = tid;
+    bool best_diag_loc_first = true;
+    int_type best_score = 0;
+    int_type current_score = 0;
+    if (tid < actual_tnum) {
+        for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
+            int mat_idx = aa2num[(q_cache[col-1] - 'A')] * ALPH_SIZE + aa2num[(t_cache[row-1] - 'A')];
+            byte_type substitution_score = score_matrix_flat[mat_idx];
+            current_score = max(0, current_score + substitution_score);
+            if (current_score > best_score) {
+                best_score = current_score;
+            }
+        }
+    }
+    if (tid + actual_tnum < diagonal_size) {
+        diag_idx = tid + actual_tnum;
+        current_score = 0;
+        for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
+            int mat_idx = aa2num[(q_cache[col-1] - 'A')] * ALPH_SIZE + aa2num[(t_cache[row-1] - 'A')];
+            byte_type substitution_score = score_matrix_flat[mat_idx];
+            current_score = max(0, current_score + substitution_score);
+            if (current_score > best_score) {
+                best_score = current_score;
+                best_diag_loc_first = false;
+            }
+        }
+    }
+
+#ifndef REDUCE_ALIGNMENT_RESULT
+    atomicMax(&best_overall_score, best_score);
+    __syncthreads();
+#else
+    if (tid < actual_tnum) {
+        best_cells[tid].score = best_score;
+        best_cells[tid].diagonal_idx = best_diag_loc_first * tid + !best_diag_loc_first * (tid + actual_tnum);
+    }
+    __syncthreads();
+    #if defined DEBUG_REDUCE
+    if (!tid) {
+        for (int i = 0; i < actual_tnum; i++) {
+            printf("i:%d, score:%d, idx:%d\n", i, best_cells[i].score, best_cells[i].diagonal_idx);
+            // printf("row:%d, score:%d, idx:%d\n", best_cells[i].row, best_cells[i].score, best_cells[i].diagonal_idx);
+        }
+    }
+    #endif
+
+    for (int i = (actual_tnum + 1) / 2; i > 0; i = (i+1) / 2) {
+        int idx = tid + i;
+        if (tid < i && idx < actual_tnum) {
+    #ifdef DEBUG_REDUCE
+            printf("(tid:%d, idx:%d| cur_size:%d block_size:%d)\n", tid, idx, i, tnum);
+    #endif
+            if (best_cells[tid].score < best_cells[idx].score) {
+                best_cells[tid].score = best_cells[idx].score;
+                // best_cells[tid].row = best_cells[idx].row;
+                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
+            }
+        }
+        __syncthreads();
+    #ifdef DEBUG_REDUCE
+        if (!tid) for (int j = 0; j < i; j++) {
+            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
+            // printf("row:%d, score:%d, idx:%d\n", best_cells[j].row, best_cells[j].score, best_cells[j].diagonal_idx);
+        }
+    #endif
+        if (i == 1)
+            break;
+    }
+
+    // now best_cells[0] holds the maximum best score
+    best_overall_score = best_cells[0].score;
+
+#endif
+
+    if (!tid) {
+#if defined REDUCE_ALIGNMENT_RESULT && defined DEBUG_REDUCE
+        printf("%d, bid:%d, best_score:%d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].diagonal_idx);
+        // printf("%d, bid:%d, best_score:%d, row: %d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].row, best_cells[0].diagonal_idx);
+#endif
+        best_scores[bid] = best_overall_score;
+    }
+}
+
+void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
 
 /* some todos for more efficiency:
     - merge minor memory transactions
@@ -345,28 +491,54 @@ void call_kernel(string query, vector<string>& targets) {
     int opt_cells_size = max_diagonal_size;
 #endif
     // calculating the maximum needed shared-memory size in bytes
-    int shared_memory_size = aa2num_len * sizeof(byte_type)
-     + score_matrix_len  * sizeof(byte_type)
-     + rows_memory_len * sizeof(int_type)
-     + q_tmax_len  * sizeof(char)
-     + opt_cells_size * sizeof(opt_cell)
-     ;
+    int shared_memory_size;
+    if (on_columns) {
+        shared_memory_size = aa2num_len * sizeof(byte_type)
+        + score_matrix_len  * sizeof(byte_type)
+        + rows_memory_len * sizeof(int_type)
+        + q_tmax_len  * sizeof(char)
+        + opt_cells_size * sizeof(opt_cell)
+        ;
 
-    local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
-        aa2num_len,
-        score_matrix_len,
-        rows_memory_len,
-        q_tmax_len,
-        opt_cells_size,
-        d_targets_fstr,
-        d_target_indices,
-        d_query_str,
-        // d_query_str_idx,
-        q_len,
-        best_scores
-    );
+        local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
+            aa2num_len,
+            score_matrix_len,
+            rows_memory_len,
+            q_tmax_len,
+            opt_cells_size,
+            d_targets_fstr,
+            d_target_indices,
+            d_query_str,
+            // d_query_str_idx,
+            q_len,
+            best_scores
+        );
+    } else {
+        opt_cells_size = max(max_target_len, q_len);
+
+        shared_memory_size = aa2num_len * sizeof(byte_type)
+        + score_matrix_len  * sizeof(byte_type)
+        + q_tmax_len  * sizeof(char)
+#ifdef REDUCE_ALIGNMENT_RESULT
+        + opt_cells_size * sizeof(opt_cell)
+#endif
+        ;
+        local_ungapped_alignment_on_diagonal<<<num_target_strs, opt_cells_size, shared_memory_size>>> (
+            aa2num_len,
+            score_matrix_len,
+            q_tmax_len,
+#ifdef REDUCE_ALIGNMENT_RESULT
+            opt_cells_size,
+#endif
+            d_targets_fstr,
+            d_target_indices,
+            d_query_str,
+            q_len,
+            best_scores
+        );
+    }
 #ifdef SHOW_KERNEL_CONF
-    printf("shared_memory_size: %d, num_targets=grid_size: %d, q_len: %d, max_t_len: %d\n", shared_memory_size, num_target_strs, q_len, max_target_len);
+    printf("shared_memory_size: %d, num_targets=grid_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", shared_memory_size, num_target_strs, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
@@ -386,14 +558,14 @@ void call_kernel(string query, vector<string>& targets) {
     cudaFree(best_scores);
 }
 
-void measure_kernel_time(string query, vector<string> targets, bool verbose, int number_of_calls=20) {
+void measure_kernel_time(string query, vector<string> targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
     clock_t start_clock, end_clock;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
     for (int i = 0; i < number_of_calls; i++) {
         start_clock = clock();
 
-        call_kernel(query, targets);
+        call_kernel(query, targets, on_columns);
 
         end_clock = clock();
 
@@ -412,15 +584,22 @@ int main(int argc, char** argv) {
     // the only argument option right now is to provide the target fasta file!
     string target_path = "TestSamples/targets.txt";
     bool is_fasta = true;
+    bool on_columns = true;
     if (argc > 1) {
         target_path = argv[1];
+        if (argc > 2) {
+            if(string(argv[2]) == "0") is_fasta = false;
+            if (argc > 3) {
+                if (string(argv[3]) == "0") on_columns = false;
+            }
+        }
     }
     init_input_from_file(target_path, targets, is_fasta);
 
 #ifdef DEBUG
-    call_kernel(queries[0], targets);
+    call_kernel(queries[0], targets, on_columns);
 #endif
-    measure_kernel_time(queries[1], targets, true, 10);
+    measure_kernel_time(queries[1], targets, on_columns, true, 10);
     
     return 0;
 }
