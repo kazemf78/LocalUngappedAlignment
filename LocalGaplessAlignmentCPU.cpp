@@ -10,6 +10,7 @@ using namespace std;
 
 
 // #define DEBUG
+// #define SHOW_RESULTS
 
 
 alignment_result * local_ungapped_alignment(string query, string target) {
@@ -131,16 +132,14 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     return res;
 }
 
-void measure_time(vector<string> queries, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose, int number_of_calls=20) {
+void measure_time(string query, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose, int number_of_calls=20) {
     clock_t start_clock, end_clock;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
     for (int i = 0; i < number_of_calls; i++) {
         start_clock = clock();
-        for (auto &q: queries) {
-            for (auto &t: targets) {
-                alignment_result* res = func(q, t);
-            }
+        for (auto &t: targets) {
+            alignment_result* res = func(query, t);
         }
         end_clock = clock();
         long execution_clocks = end_clock - start_clock;
@@ -165,17 +164,17 @@ int main() {
     }
 #endif
     init_score_matrix();
-    measure_time(queries, targets, &local_ungapped_alignment, false);
-    measure_time(queries, targets, &local_ungapped_alignment_less_memory, false);
 
-#ifdef DEBUG2
+#ifndef SHOW_RESULTS
+    measure_time(queries[0], targets, &local_ungapped_alignment, false);
+    measure_time(queries[0], targets, &local_ungapped_alignment_less_memory, false);
+#else
     string q = queries[0];
     for (auto &t: targets) {
         alignment_result *res = local_ungapped_alignment_less_memory(q, t);
         int lq = q.size(), lt = t.size();
-        // cout << q << ", length: " << t.size() << ", row: " << res->best_cells[res->best_diagonal].row <<  ", diag: " << res->best_diagonal << " "; debug(res->best_score); //debug(res->best_diagonal); cout << endl;
-        // cout << t.substr(0, 10) << ":" << t.size() << ": " << res->best_cells[res->best_diagonal].row <<  ", diag: " << res->best_diagonal << " "; debug(res->best_score);
-        cout << t.substr(0, 10) << ":" << t.size() << ": " << res->best_score << endl;
+        cout << q.substr(0, 10) << "," << t.substr(0, 10);
+        printf("(%4d,%4d): %4d\n", lq, lt, res->best_score);
      }
 #endif
     return 0;
