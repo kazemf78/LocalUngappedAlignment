@@ -8,10 +8,13 @@ using namespace std;
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
 
-#define SHOW_KERNEL_CONF
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
 // #define DEBUG
+#define SHOW_KERNEL_CONF
+#ifdef DEBUG
+    #define SHOW_ALIGNMENT_SCORES
+#endif
 
 // #define REDUCE_ON_COLUMNS
 #define REDUCE_ALIGNMENT_RESULT
@@ -106,12 +109,9 @@ __global__ void local_ungapped_alignment(
     // - the block size (or number of threads) equals query size ([tnum = q_len = bsize] in code)
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
-    __shared__ int best_score; best_score = 0;
+    __shared__ int best_overall_score; best_overall_score = 0;
 #if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
     __shared__ int mutex; mutex = 0;
-#endif
-#if !defined REDUCE_ALIGNMENT_RESULT
-    // __shared__ int best_diag_idx; best_diag_idx = -1;
 #endif
     // some preprocessing of variables (these would go on registers probably)
     int bid = blockIdx.x; int tid =  threadIdx.x; int bsize = blockDim.x; int tnum = bsize;
@@ -162,7 +162,6 @@ __global__ void local_ungapped_alignment(
     }
 
 #ifdef REDUCE_ON_COLUMNS
-    // best_cells[tid].row = 0;
     best_cells[tid].score = 0;
     best_cells[tid].diagonal_idx = USHRT_MAX;
 #else
@@ -170,7 +169,6 @@ __global__ void local_ungapped_alignment(
     for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < diagonal_size) {
-            // best_cells[idx].row = 0;
             best_cells[idx].score = 0;
             best_cells[idx].diagonal_idx = idx;
         }
@@ -199,25 +197,21 @@ __global__ void local_ungapped_alignment(
 #ifdef REDUCE_ON_COLUMNS
         if (current_score > best_cells[tid].score) {
             best_cells[tid].score = current_score;
-            // best_cells[tid].row = row;
             best_cells[tid].diagonal_idx = current_diagonal;
 #else
         if (current_score > best_cells[current_diagonal].score) {
             best_cells[current_diagonal].score = current_score;
-            // best_cells[current_diagonal].row = row;
 #endif
-            // here we have a race condition to update the best_score and best_diagonal
+            // here we have a race condition to update the best_overall_score and best_diagonal
 #if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
-            // lock(&mutex);
             while (atomicCAS(&mutex, 0, 1) != 0); // lock
-            if (current_score > best_score) {
-                best_score = current_score;
-                best_diag_idx = current_diagonal;
+            if (current_score > best_overall_score) {
+                best_overall_score = current_score;
+                // best_diag_idx = current_diagonal;
             }
             atomicExch(&mutex, 0); // unlock
-            // unlock(&mutex);
 #elif !defined REDUCE_ALIGNMENT_RESULT && !defined USE_LOCK
-            atomicMax(&best_score, current_score);
+            atomicMax(&best_overall_score, current_score);
 #endif
         }
         // to reassure that all current_row cells are updated before using them
@@ -236,7 +230,6 @@ __global__ void local_ungapped_alignment(
         printf("before reduction:\n");
         for (int i = 0; i < diagonal_size; i++) {
             printf("score:%d, idx:%d\n", best_cells[i].score, best_cells[i].diagonal_idx);
-            // printf("row:%d, score:%d, idx:%d\n", best_cells[i].row, best_cells[i].score, best_cells[i].diagonal_idx);
         }
     }
     #endif
@@ -246,7 +239,6 @@ __global__ void local_ungapped_alignment(
     for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < diagonal_size && best_cells[tid].score < best_cells[idx].score) {
-            // best_cells[tid].row = best_cells[idx].row;
             best_cells[tid].score = best_cells[idx].score;
             best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
         }
@@ -261,7 +253,6 @@ __global__ void local_ungapped_alignment(
     #endif
             if (best_cells[tid].score < best_cells[idx].score) {
                 best_cells[tid].score = best_cells[idx].score;
-                // best_cells[tid].row = best_cells[idx].row;
                 best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
             }
         }
@@ -269,30 +260,27 @@ __global__ void local_ungapped_alignment(
     #ifdef DEBUG_REDUCE
         if (!tid) for (int j = 0; j < i; j++) {
             printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
-            // printf("row:%d, score:%d, idx:%d\n", best_cells[j].row, best_cells[j].score, best_cells[j].diagonal_idx);
         }
     #endif
         if (i == 1)
             break;
     }
-    best_score = best_cells[0].score;
     // now best_cells[0] holds the maximum best score
+    best_overall_score = best_cells[0].score;
     #ifdef DEBUG_REDUCE
         printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx);
-        // printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d, row:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx, best_cells[0].row);
     #endif
 #else
     #ifdef DEBUG_KERNEL
-    printf("end of thread %d, best_score: %d\n", tid, best_score);
+    printf("end of thread %d, best_overall_score: %d\n", tid, best_overall_score);
     #endif
 #endif
 
     if (!tid) {
 #if defined REDUCE_ALIGNMENT_RESULT && defined DEBUG_REDUCE
-        printf("%d, bid:%d, best_score:%d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].diagonal_idx);
-        // printf("%d, bid:%d, best_score:%d, row: %d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].row, best_cells[0].diagonal_idx);
+        printf("%d, bid:%d, best_overall_score:%d, best_diag: %d\n", t_len, bid, best_overall_score, best_cells[0].diagonal_idx);
 #endif
-        best_scores[bid] = best_score;
+        best_scores[bid] = best_overall_score;
     }
 }
 
@@ -399,7 +387,6 @@ __global__ void local_ungapped_alignment_on_diagonal(
     if (!tid) {
         for (int i = 0; i < actual_tnum; i++) {
             printf("i:%d, score:%d, idx:%d\n", i, best_cells[i].score, best_cells[i].diagonal_idx);
-            // printf("row:%d, score:%d, idx:%d\n", best_cells[i].row, best_cells[i].score, best_cells[i].diagonal_idx);
         }
     }
     #endif
@@ -412,7 +399,6 @@ __global__ void local_ungapped_alignment_on_diagonal(
     #endif
             if (best_cells[tid].score < best_cells[idx].score) {
                 best_cells[tid].score = best_cells[idx].score;
-                // best_cells[tid].row = best_cells[idx].row;
                 best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
             }
         }
@@ -420,7 +406,6 @@ __global__ void local_ungapped_alignment_on_diagonal(
     #ifdef DEBUG_REDUCE
         if (!tid) for (int j = 0; j < i; j++) {
             printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
-            // printf("row:%d, score:%d, idx:%d\n", best_cells[j].row, best_cells[j].score, best_cells[j].diagonal_idx);
         }
     #endif
         if (i == 1)
@@ -435,7 +420,6 @@ __global__ void local_ungapped_alignment_on_diagonal(
     if (!tid) {
 #if defined REDUCE_ALIGNMENT_RESULT && defined DEBUG_REDUCE
         printf("%d, bid:%d, best_score:%d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].diagonal_idx);
-        // printf("%d, bid:%d, best_score:%d, row: %d, best_diag: %d\n", t_len, bid, best_score, best_cells[0].row, best_cells[0].diagonal_idx);
 #endif
         best_scores[bid] = best_overall_score;
     }
@@ -542,13 +526,11 @@ void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
-    // cudaDeviceSynchronize();
-#ifdef DEBUG2
+#ifdef SHOW_ALIGNMENT_SCORES
     cout << "final scores:" << endl;
     for (int i = 0; i < num_target_strs; i++) {
         cout << query.substr(0, 10) << "," << targets[i].substr(0, 10);
-        printf("(%3d,%3d): %3d\n", q_len, (int)targets[i].size(), best_scores[i]);
-        // cout << targets[i].substr(0, 10) << ":" << targets[i].size() << ": " << best_scores[i] << endl;
+        printf("(%4d,%4d): %4d\n", q_len, (int)targets[i].size(), best_scores[i]);
     }
 #endif
     // freeing device memory
@@ -580,26 +562,33 @@ void measure_kernel_time(string query, vector<string> targets, bool on_columns=t
 int main(int argc, char** argv) {
     vector<string> queries, targets;
     init_score_matrix();
-    init_input_from_file("TestSamples/queries.txt", queries, false);
-    // the only argument option right now is to provide the target fasta file!
+    // arguments are optional and the default ones are targets=TestSamples/targets.txt, is_fasta=true, on_columns=true, query=TestSamples/queries.txt[0]
+    // the 1s argument tells the file path, the 2nd one tells if target file is fasta, the 3rd determines alignment method (on-columns or on-diagonals) and the 4th tell query path
+    // only string "0" can change 2nd and 3rd arguments to "not fasta" and "not on_column" (i.e "on_diagonal")
     string target_path = "TestSamples/targets.txt";
-    bool is_fasta = true;
+    string query_path = "TestSamples/queries.txt";
+    bool is_target_fasta = true;
     bool on_columns = true;
     if (argc > 1) {
         target_path = argv[1];
         if (argc > 2) {
-            if(string(argv[2]) == "0") is_fasta = false;
+            if(string(argv[2]) == "0") is_target_fasta = false;
             if (argc > 3) {
                 if (string(argv[3]) == "0") on_columns = false;
+                if (argc > 4) {
+                    query_path = argv[4];
+                }
             }
         }
     }
-    init_input_from_file(target_path, targets, is_fasta);
+    init_input_from_file(query_path, queries, false);
+    init_input_from_file(target_path, targets, is_target_fasta);
 
 #ifdef DEBUG
     call_kernel(queries[0], targets, on_columns);
+#else
+    measure_kernel_time(queries[0], targets, on_columns, true, 10);
 #endif
-    measure_kernel_time(queries[1], targets, on_columns, true, 10);
     
     return 0;
 }
