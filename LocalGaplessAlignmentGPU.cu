@@ -3,7 +3,6 @@
 #include "Utils.h"
 #include "ScoreMatrix.h"
 
-using namespace std;
 
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
@@ -18,7 +17,6 @@ using namespace std;
 
 // #define REDUCE_ON_COLUMNS
 #define REDUCE_ALIGNMENT_RESULT
-// #define USE_LOCK
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -33,19 +31,10 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 // the type doesn't actually matter!
 extern __shared__ int shared_memory[];
 
-__constant__ byte_type _aa2num['Z' - 'A'];
 __constant__ byte_type _score_matrix[ALPH_SIZE * ALPH_SIZE];
 
-__device__ void lock(int* mutex) {
-    while (atomicCAS(mutex, 0, 1) != 0) {}
-}
-
-__device__ void unlock(int* mutex) {
-    atomicExch(mutex, 0);
-}
-
-void allcoate_strings_on_device_flattened(vector<string> strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
-    string flat_temp; int* flat_ids; char * flat_str;
+void allcoate_strings_on_device_flattened(const vector<std::string>& strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
+    std::string flat_temp; int* flat_ids; char * flat_str;
     flat_ids = (int *) malloc((num_strs + 1) * sizeof(int));
     int cur_ptr = 0;
     // todo: maybe implementation of flattening can be more efficient but it's more readable now, improve it later on?
@@ -53,6 +42,10 @@ void allcoate_strings_on_device_flattened(vector<string> strings, char ** d_fstr
         flat_ids[i] = cur_ptr;
         flat_temp += strings[i];
         cur_ptr += strings[i].size();
+    }
+    // convert chars to indexes on aa2num
+    for (int i = 0; i < cur_ptr; i++) {
+        flat_temp[i] = (char)aa2num[flat_temp[i] - 'A'];
     }
     flat_ids[num_strs] = cur_ptr;
     int total_chars_num = cur_ptr;
@@ -70,7 +63,7 @@ void free_strings_on_device_flattened(char* d_fstr, int* d_fids) {
     cudaFree(d_fids);
 }
 
-void allocate_strings_on_device_ptr2ptr(vector<string> strings, char *** d_str_ptrs_addr, char *** d_temp_strs_addr, int num_strs) {
+void allocate_strings_on_device_ptr2ptr(const vector<std::string>& strings, char *** d_str_ptrs_addr, char *** d_temp_strs_addr, int num_strs) {
     cudaMalloc(d_str_ptrs_addr, num_strs * sizeof(char *));
     *d_temp_strs_addr = (char **) malloc(num_strs * sizeof(char*));
     char** d_str_ptrs = *d_str_ptrs_addr;
@@ -91,15 +84,13 @@ void free_strings_on_device_ptr2ptr(char** d_str_ptrs, char** d_temp_strs, int n
 }
 
 __global__ void local_ungapped_alignment(
-    int aa2num_len,
     int score_matrix_len,
     int rows_memory_len,
     int q_tmax_len,
     int opt_cells_size,
     char* target_flat_str,
     int* flat_ids,
-    char* query,
-    // char* query_idx,
+    char* query_idx,
     int q_len,
     int_type* best_scores
 ) {
@@ -110,36 +101,24 @@ __global__ void local_ungapped_alignment(
     // - the target is spreaded on the row (axis=0) and the query on columns (axis=1)
 
     __shared__ int best_overall_score; best_overall_score = 0;
-#if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
-    __shared__ int mutex; mutex = 0;
-#endif
     // some preprocessing of variables (these would go on registers probably)
     int bid = blockIdx.x; int tid =  threadIdx.x; int bsize = blockDim.x; int tnum = bsize;
     int t_start_idx = flat_ids[bid];
     int t_len = flat_ids[bid + 1] - t_start_idx;
 
     // dynamically divide the whole shared memory for the shared memory variables
-    byte_type* aa2num = (byte_type *)shared_memory;
-    byte_type* score_matrix_flat = (byte_type *)&aa2num[aa2num_len];
-    int_type* last_row = (int_type *)&score_matrix_flat[score_matrix_len];
-    int_type* current_row = (int_type *)&last_row[q_len + 1];
     /* Note1: the order of these allocations actually matters and if not considered, the "misaligned address" error could occur
         for example cuda needs that int* pointers, point to addresses aligned with 32 bytes and if we allocate the char* before int* it's probable this error occurs
        Note2: the size of variables being used here is their actual size not the max size we had to specify for the kernel call
        todo: would be nice if we could free or release the additional space previously reserved but not used here */
+    int_type* last_row = (int_type *)shared_memory;
+    int_type* current_row = (int_type *)&last_row[q_len + 1];
     opt_cell* best_cells = (opt_cell*)&current_row[q_len + 1];
     char* q_cache = (char *)&best_cells[opt_cells_size];
     char* t_cache = (char *)&q_cache[q_len];
+    byte_type* score_matrix_flat = (byte_type *)&t_cache[t_len];
     
-    // todo: extract a function for this repeated allocations if possible
     // initialize and retrieve content of shared memory variables
-    for (int i = 0; i < (aa2num_len + tnum - 1) / tnum; i++) {
-        int idx = i * tnum + tid;
-        if (idx < aa2num_len) {
-            aa2num[idx] = _aa2num[idx];
-        }
-    }
-
     for (int i = 0; i < (score_matrix_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < score_matrix_len) {
@@ -151,8 +130,7 @@ __global__ void local_ungapped_alignment(
     last_row[tid] = 0;
     // current row does not need initialization!
     
-    q_cache[tid] = query[tid];
-    // q_cache[tid] = query_idx[tid];
+    q_cache[tid] = query_idx[tid];
 
     for (int i = 0; i < (t_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
@@ -181,9 +159,7 @@ __global__ void local_ungapped_alignment(
     // todo: test the thrust and cuBLAS library and the reduce method for acquiring extermum in an array
     for (int row = 1; row <= t_len; row++) {
         // this thread works on column = tid + 1 and q[tid] char
-        // int char_idx = (int) q_cache[tid];
-        // int mat_idx = char_idx * ALPH_SIZE + aa2num[int(t_cache[row-1] - 'A')];
-        int mat_idx = aa2num[(q_cache[tid] - 'A')] * ALPH_SIZE + aa2num[(t_cache[row-1] - 'A')];
+        int mat_idx = q_cache[tid] * ALPH_SIZE + t_cache[row-1];
         byte_type substitution_score = score_matrix_flat[mat_idx];
 #ifdef DEBUG_KERNEL
         printf("(r%d%c, c%2d%c)%2d\n", row, t_cache[row-1], tid+1, q_cache[tid], substitution_score);
@@ -203,14 +179,7 @@ __global__ void local_ungapped_alignment(
             best_cells[current_diagonal].score = current_score;
 #endif
             // here we have a race condition to update the best_overall_score and best_diagonal
-#if !defined REDUCE_ALIGNMENT_RESULT && defined USE_LOCK
-            while (atomicCAS(&mutex, 0, 1) != 0); // lock
-            if (current_score > best_overall_score) {
-                best_overall_score = current_score;
-                // best_diag_idx = current_diagonal;
-            }
-            atomicExch(&mutex, 0); // unlock
-#elif !defined REDUCE_ALIGNMENT_RESULT && !defined USE_LOCK
+#if !defined REDUCE_ALIGNMENT_RESULT
             atomicMax(&best_overall_score, current_score);
 #endif
         }
@@ -285,7 +254,6 @@ __global__ void local_ungapped_alignment(
 }
 
 __global__ void local_ungapped_alignment_on_diagonal(
-    int aa2num_len,
     int score_matrix_len,
     int q_tmax_len,
 #ifdef REDUCE_ALIGNMENT_RESULT
@@ -313,26 +281,17 @@ __global__ void local_ungapped_alignment_on_diagonal(
     int actual_tnum = max(t_len, q_len);
 
     // dynamically divide the whole shared memory for the shared memory variables
-    byte_type* aa2num = (byte_type *)shared_memory;
-    byte_type* score_matrix_flat = (byte_type *)&aa2num[aa2num_len];
 #ifdef REDUCE_ALIGNMENT_RESULT
-    opt_cell* best_cells = (opt_cell*)&score_matrix_flat[score_matrix_len];
+    opt_cell* best_cells = (opt_cell*)shared_memory;
     char* q_cache = (char *)&best_cells[opt_cells_size];
     char* t_cache = (char *)&q_cache[q_len];
 #else
-    char* q_cache = (char *)&score_matrix_flat[score_matrix_len];
+    char* q_cache = (char *)shared_memory;
     char* t_cache = (char *)&q_cache[q_len];
 #endif
+    byte_type* score_matrix_flat = (byte_type *)&t_cache[t_len];
 
-    // todo: extract a function for this repeated allocations if possible
     // initialize and retrieve content of shared memory variables
-    for (int i = 0; i < (aa2num_len + tnum - 1) / tnum; i++) {
-        int idx = i * tnum + tid;
-        if (idx < aa2num_len) {
-            aa2num[idx] = _aa2num[idx];
-        }
-    }
-
     for (int i = 0; i < (score_matrix_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
         if (idx < score_matrix_len) {
@@ -352,7 +311,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     int_type current_score = 0;
     if (tid < actual_tnum) {
         for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
-            int mat_idx = aa2num[(q_cache[col-1] - 'A')] * ALPH_SIZE + aa2num[(t_cache[row-1] - 'A')];
+            int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
             byte_type substitution_score = score_matrix_flat[mat_idx];
             current_score = max(0, current_score + substitution_score);
             if (current_score > best_score) {
@@ -364,7 +323,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
         diag_idx = tid + actual_tnum;
         current_score = 0;
         for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
-            int mat_idx = aa2num[(q_cache[col-1] - 'A')] * ALPH_SIZE + aa2num[(t_cache[row-1] - 'A')];
+            int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
             byte_type substitution_score = score_matrix_flat[mat_idx];
             current_score = max(0, current_score + substitution_score);
             if (current_score > best_score) {
@@ -425,7 +384,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     }
 }
 
-void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
+void call_kernel(const std::string query, const vector<std::string>& targets, bool on_columns=true) {
 
 /* some todos for more efficiency:
     - merge minor memory transactions
@@ -442,30 +401,25 @@ void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
     char * q_str = (char *) query.c_str();
     int q_len = query.size();
     // convert query to its indexes on aa2num
-    // char * q_str_idx = (char *)malloc(q_len * sizeof(char));
-    // for (int i = 0; i < q_len; i++) {
-    //     q_str_idx[i] = (char)aa2num[q_str[i] - 'A'];
-    // }
+    char * q_str_idx = (char *)malloc(q_len * sizeof(char));
+    for (int i = 0; i < q_len; i++) {
+        q_str_idx[i] = (char)aa2num[q_str[i] - 'A'];
+    }
     int num_target_strs = targets.size();
 
     // allocate and initialize some necessary variables on device for kernel call
-    char * d_query_str; char * d_targets_fstr; int * d_target_indices; int_type *best_scores;
-    cudaMalloc(&d_query_str, q_len * sizeof(char));
-    cudaMemcpy(d_query_str, q_str, q_len * sizeof(char), cudaMemcpyHostToDevice);
-
-    // char * d_query_str_idx; char * d_targets_fstr; int * d_target_indices; int *best_scores;
-    // cudaMalloc(&d_query_str_idx, q_len * sizeof(char));
-    // cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
+    char * d_query_str_idx; char * d_targets_fstr; int * d_target_indices; int_type *best_scores;
+    cudaMalloc(&d_query_str_idx, q_len * sizeof(char));
+    cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
     cudaMallocManaged(&best_scores, num_target_strs * sizeof(int_type));
     // be sure to have called init_score_matrix() before using score matrix
     // todo: do sth about this init_score_matrix necessity
     cudaMemcpyToSymbol(_score_matrix, score_matrix_flattened, SCORE_MATRIX_SIZE * sizeof(byte_type));
-    cudaMemcpyToSymbol(_aa2num, aa2num, ('Z' - 'A') * sizeof(byte_type));
 
     // calculating the (maximum) size of different variables which will go on shared-memory
-    int aa2num_len = 'Z' - 'A';
-    int score_matrix_len = SCORE_MATRIX_SIZE;
+    // also a future todo: remove this score_matrix_len from argument list of kernel functions
+    // int score_matrix_len = SCORE_MATRIX_SIZE;
     int rows_memory_len = 2 * (q_len + 1); // current row + last row
     int q_tmax_len = (max_target_len + q_len);
 #ifdef REDUCE_ON_COLUMNS
@@ -477,46 +431,41 @@ void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
     // calculating the maximum needed shared-memory size in bytes
     int shared_memory_size;
     if (on_columns) {
-        shared_memory_size = aa2num_len * sizeof(byte_type)
-        + score_matrix_len  * sizeof(byte_type)
+        shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
         + rows_memory_len * sizeof(int_type)
         + q_tmax_len  * sizeof(char)
         + opt_cells_size * sizeof(opt_cell)
         ;
 
         local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
-            aa2num_len,
-            score_matrix_len,
+            SCORE_MATRIX_SIZE,
             rows_memory_len,
             q_tmax_len,
             opt_cells_size,
             d_targets_fstr,
             d_target_indices,
-            d_query_str,
-            // d_query_str_idx,
+            d_query_str_idx,
             q_len,
             best_scores
         );
     } else {
         opt_cells_size = max(max_target_len, q_len);
 
-        shared_memory_size = aa2num_len * sizeof(byte_type)
-        + score_matrix_len  * sizeof(byte_type)
+        shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
         + q_tmax_len  * sizeof(char)
 #ifdef REDUCE_ALIGNMENT_RESULT
         + opt_cells_size * sizeof(opt_cell)
 #endif
         ;
         local_ungapped_alignment_on_diagonal<<<num_target_strs, opt_cells_size, shared_memory_size>>> (
-            aa2num_len,
-            score_matrix_len,
+            SCORE_MATRIX_SIZE,
             q_tmax_len,
 #ifdef REDUCE_ALIGNMENT_RESULT
             opt_cells_size,
 #endif
             d_targets_fstr,
             d_target_indices,
-            d_query_str,
+            d_query_str_idx,
             q_len,
             best_scores
         );
@@ -535,12 +484,11 @@ void call_kernel(string query, vector<string>& targets, bool on_columns=true) {
 #endif
     // freeing device memory
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
-    cudaFree(d_query_str);
-    // cudaFree(d_query_str_idx);
+    cudaFree(d_query_str_idx);
     cudaFree(best_scores);
 }
 
-void measure_kernel_time(string query, vector<string> targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
+void measure_kernel_time(const std::string query, const vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
     clock_t start_clock, end_clock;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
@@ -565,16 +513,16 @@ int main(int argc, char** argv) {
     // arguments are optional and the default ones are targets=TestSamples/targets.txt, is_fasta=true, on_columns=true, query=TestSamples/queries.txt[0]
     // the 1s argument tells the file path, the 2nd one tells if target file is fasta, the 3rd determines alignment method (on-columns or on-diagonals) and the 4th tell query path
     // only string "0" can change 2nd and 3rd arguments to "not fasta" and "not on_column" (i.e "on_diagonal")
-    string target_path = "TestSamples/targets.txt";
-    string query_path = "TestSamples/queries.txt";
+    std::string target_path = "TestSamples/targets.txt";
+    std::string query_path = "TestSamples/queries.txt";
     bool is_target_fasta = true;
     bool on_columns = true;
     if (argc > 1) {
         target_path = argv[1];
         if (argc > 2) {
-            if(string(argv[2]) == "0") is_target_fasta = false;
+            if(std::string(argv[2]) == "0") is_target_fasta = false;
             if (argc > 3) {
-                if (string(argv[3]) == "0") on_columns = false;
+                if (std::string(argv[3]) == "0") on_columns = false;
                 if (argc > 4) {
                     query_path = argv[4];
                 }
