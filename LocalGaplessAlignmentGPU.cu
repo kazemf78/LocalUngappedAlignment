@@ -16,7 +16,7 @@
 #endif
 
 // #define REDUCE_ON_COLUMNS
-#define REDUCE_ALIGNMENT_RESULT
+// #define REDUCE_ALIGNMENT_RESULT
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -306,7 +306,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
 
     // now actual alignment algorithm can begin :D
     int diag_idx = tid;
-    bool best_diag_loc_first = true;
+    int best_diag_idx = diag_idx;
     int_type best_score = 0;
     int_type current_score = 0;
     if (tid < actual_tnum) {
@@ -328,7 +328,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
             current_score = max(0, current_score + substitution_score);
             if (current_score > best_score) {
                 best_score = current_score;
-                best_diag_loc_first = false;
+                best_diag_idx = diag_idx;
             }
         }
     }
@@ -339,7 +339,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
 #else
     if (tid < actual_tnum) {
         best_cells[tid].score = best_score;
-        best_cells[tid].diagonal_idx = best_diag_loc_first * tid + !best_diag_loc_first * (tid + actual_tnum);
+        best_cells[tid].diagonal_idx = best_diag_idx;
     }
     __syncthreads();
     #if defined DEBUG_REDUCE
