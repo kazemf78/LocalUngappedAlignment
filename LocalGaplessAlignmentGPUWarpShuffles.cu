@@ -1,8 +1,10 @@
 // remember!
 #include <bits/stdc++.h>
+#include <cooperative_groups.h>
 #include "Utils.h"
 #include "ScoreMatrix.h"
 
+namespace cg = cooperative_groups;
 
 #define MAX_LEN 1024
 #define FULL_MASK 0xffffffff
@@ -82,6 +84,64 @@ void free_strings_on_device_ptr2ptr(char** d_str_ptrs, char** d_temp_strs, int n
     cudaFree(d_str_ptrs);
     for (int i = 0; i < num_strs; i++) {
         cudaFree(d_temp_strs[i]);
+    }
+}
+
+__device__ void initial_all_reduce(cg::thread_block block, opt_cell * best_cells, unsigned int tid, int& cur_step, int array_size) {
+    for (; cur_step > WARP_SIZE; cur_step = (cur_step + 1) / 2) {
+        int idx = tid + cur_step;
+        if (tid < cur_step && idx < array_size) {
+    #ifdef DEBUG_REDUCE
+            if (!tid) printf("(tid:%d, idx:%d| cur_size:%d)\n", tid, idx, cur_step);
+    #endif
+            if (best_cells[tid].score < best_cells[idx].score) {
+                best_cells[tid].score = best_cells[idx].score;
+                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
+            }
+        }
+        block.sync();
+    #ifdef DEBUG_REDUCE
+        if (!tid) for (int j = 0; j < cur_step; j++) {
+            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
+        }
+    #endif
+    }
+}
+
+__device__ void initial_warp_reduce(opt_cell * best_cells, unsigned int tid, int best_score_param, int best_diag_idx_param) {
+    int score_tmp, diag_idx_tmp;
+    int best_score = best_score_param;
+    int best_diag_idx = best_diag_idx_param;
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        score_tmp = __shfl_down_sync(FULL_MASK, best_score, offset);
+        diag_idx_tmp = __shfl_down_sync(FULL_MASK, best_diag_idx, offset);
+        if (score_tmp > best_score) {
+            best_score = score_tmp;
+            best_diag_idx = diag_idx_tmp;
+        }
+    }
+    if (tid % WARP_SIZE == 0) {
+        best_cells[tid / WARP_SIZE].score = best_score;
+        best_cells[tid / WARP_SIZE].diagonal_idx = best_diag_idx;
+    }
+}
+
+__device__ void final_warp_reduce(volatile opt_cell * best_cells, unsigned int tid, int cur_step, int array_size) {
+    for (; cur_step > 0; cur_step = (cur_step + 1) / 2) {
+        int idx = tid + cur_step;
+        if (tid < cur_step && idx < array_size) {
+            if (best_cells[tid].score < best_cells[idx].score) {
+                best_cells[tid].score = best_cells[idx].score;
+                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
+            }
+        }
+#ifdef DEBUG_REDUCE
+        if (!tid) for (int j = 0; j < cur_step; j++) {
+            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
+        }
+#endif
+        if (cur_step == 1)
+            break;
     }
 }
 
@@ -255,25 +315,6 @@ __global__ void local_ungapped_alignment(
     }
 }
 
-__device__ void warp_reduce(volatile opt_cell * best_cells, unsigned int tid, int cur_step, int array_size) {
-    for (; cur_step > 0; cur_step = (cur_step + 1) / 2) {
-        int idx = tid + cur_step;
-        if (tid < cur_step && idx < array_size) {
-            if (best_cells[tid].score < best_cells[idx].score) {
-                best_cells[tid].score = best_cells[idx].score;
-                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
-            }
-        }
-#ifdef DEBUG_REDUCE
-        if (!tid) for (int j = 0; j < cur_step; j++) {
-            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
-        }
-#endif
-        if (cur_step == 1)
-            break;
-    }
-}
-
 __global__ void local_ungapped_alignment_on_diagonal(
     int score_matrix_len,
     int q_tmax_len,
@@ -361,19 +402,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     // here we first reduce results on each warp seperately with using warp_shuffle operations
     // this can divide the length of best_cells by 32 and save shared_memory
     if (tid < actual_tnum) {
-        int score_tmp, diag_idx_tmp;
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            score_tmp = __shfl_down_sync(FULL_MASK, best_score, offset);
-            diag_idx_tmp = __shfl_down_sync(FULL_MASK, best_diag_idx, offset);
-            if (score_tmp > best_score) {
-                best_score = score_tmp;
-                best_diag_idx = diag_idx_tmp;
-            }
-        }
-        if (tid % WARP_SIZE == 0) {
-            best_cells[tid / WARP_SIZE].score = best_score;
-            best_cells[tid / WARP_SIZE].diagonal_idx = best_diag_idx;
-        }
+        initial_warp_reduce(best_cells, tid, best_score, best_diag_idx);
     }
     __syncthreads();
     #if defined DEBUG_REDUCE
@@ -387,26 +416,9 @@ __global__ void local_ungapped_alignment_on_diagonal(
     // instead only the first warp will resume reducing seperately
     int array_size = (actual_tnum + WARP_SIZE - 1) / WARP_SIZE;
     int cur_step = (array_size + 1) / 2;
-    for (; cur_step > WARP_SIZE; cur_step = (cur_step + 1) / 2) {
-        int idx = tid + cur_step;
-        if (tid < cur_step && idx < array_size) {
-    #ifdef DEBUG_REDUCE
-            if (!tid) printf("(tid:%d, idx:%d| cur_size:%d block_size:%d)\n", tid, idx, cur_step, tnum);
-    #endif
-            if (best_cells[tid].score < best_cells[idx].score) {
-                best_cells[tid].score = best_cells[idx].score;
-                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
-            }
-        }
-        __syncthreads();
-    #ifdef DEBUG_REDUCE
-        if (!tid) for (int j = 0; j < cur_step; j++) {
-            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
-        }
-    #endif
-    }
+    initial_all_reduce(cg::this_thread_block(), best_cells, tid, cur_step, array_size);
     if (tid < WARP_SIZE) {
-        warp_reduce(best_cells, tid, cur_step, array_size);
+        final_warp_reduce(best_cells, tid, cur_step, array_size);
     }
     // now best_cells[0] holds the maximum best score
     if (!tid) best_overall_score = best_cells[0].score;
