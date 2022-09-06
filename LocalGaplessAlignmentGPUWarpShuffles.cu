@@ -340,7 +340,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     int t_start_idx = flat_ids[bid];
     int t_len = flat_ids[bid + 1] - t_start_idx;
     int diagonal_size = t_len + q_len - 1;
-    int actual_tnum = max(t_len, q_len);
+    int actual_diag_size = max(t_len, q_len);
 
     // dynamically divide the whole shared memory for the shared memory variables
 #ifdef REDUCE_ALIGNMENT_RESULT
@@ -361,36 +361,50 @@ __global__ void local_ungapped_alignment_on_diagonal(
         }
     }
 
-    q_cache[min(tid, q_len-1)] = query[min(tid, q_len-1)];
-    t_cache[min(tid, t_len-1)] = target_flat_str[min(tid, t_len-1) + t_start_idx];
+    for (int i = 0; i < (q_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < q_len) {
+            q_cache[idx] = query[idx];
+        }
+    }
+
+    for (int i = 0; i < (t_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < t_len) {
+            t_cache[idx] = target_flat_str[idx + t_start_idx];
+        }
+    }
 
     __syncthreads();
 
     // now actual alignment algorithm can begin :D
-    int diag_idx = tid;
-    int best_diag_idx = diag_idx;
     int_type best_score = 0;
-    int_type current_score = 0;
-    if (tid < actual_tnum) {
-        for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
-            int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
-            byte_type substitution_score = score_matrix_flat[mat_idx];
-            current_score = max(0, current_score + substitution_score);
-            if (current_score > best_score) {
-                best_score = current_score;
+    int best_diag_idx = 0;
+    for (int i = 0; i < (actual_diag_size + tnum - 1) / tnum; i++) {
+        int diag_idx = i * tnum + tid;
+        int_type current_score = 0;
+        if (diag_idx < actual_diag_size) {
+            for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
+                int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
+                byte_type substitution_score = score_matrix_flat[mat_idx];
+                current_score = max(0, current_score + substitution_score);
+                if (current_score > best_score) {
+                    best_score = current_score;
+                    best_diag_idx = diag_idx;
+                }
             }
         }
-    }
-    if (tid + actual_tnum < diagonal_size) {
-        diag_idx = tid + actual_tnum;
-        current_score = 0;
-        for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
-            int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
-            byte_type substitution_score = score_matrix_flat[mat_idx];
-            current_score = max(0, current_score + substitution_score);
-            if (current_score > best_score) {
-                best_score = current_score;
-                best_diag_idx = diag_idx;
+        if (diag_idx + actual_diag_size < diagonal_size) {
+            diag_idx = diag_idx + actual_diag_size;
+            current_score = 0;
+            for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
+                int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
+                byte_type substitution_score = score_matrix_flat[mat_idx];
+                current_score = max(0, current_score + substitution_score);
+                if (current_score > best_score) {
+                    best_score = current_score;
+                    best_diag_idx = diag_idx;
+                }
             }
         }
     }
@@ -401,20 +415,20 @@ __global__ void local_ungapped_alignment_on_diagonal(
 #else
     // here we first reduce results on each warp seperately with using warp_shuffle operations
     // this can divide the length of best_cells by 32 and save shared_memory
-    if (tid < actual_tnum) {
+    if (tid < actual_diag_size) { // no need to check for tid < tnum which is redundant
         initial_warp_reduce(best_cells, tid, best_score, best_diag_idx);
     }
     __syncthreads();
     #if defined DEBUG_REDUCE
     if (!tid) {
-        for (int i = 0; i < (actual_tnum + WARP_SIZE - 1) / WARP_SIZE; i++) {
+        for (int i = 0; i < (min(actual_diag_size, tnum) + WARP_SIZE - 1) / WARP_SIZE; i++) {
             printf("i:%d, score:%d, idx:%d\n", i, best_cells[i].score, best_cells[i].diagonal_idx);
         }
     }
     #endif
     // what we're doing here is that we divide the last 5 iterations of this loop to avoid stalling the majority of the threads that are idle
     // instead only the first warp will resume reducing seperately
-    int array_size = (actual_tnum + WARP_SIZE - 1) / WARP_SIZE;
+    int array_size = (min(actual_diag_size, tnum) + WARP_SIZE - 1) / WARP_SIZE;
     int cur_step = (array_size + 1) / 2;
     initial_all_reduce(cg::this_thread_block(), best_cells, tid, cur_step, array_size);
     if (tid < WARP_SIZE) {
@@ -498,7 +512,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
             best_scores
         );
     } else {
-        opt_cells_size = (max(max_target_len, q_len) + WARP_SIZE - 1) / WARP_SIZE;
+        opt_cells_size = (min(max(max_target_len, q_len), MAX_LEN) + WARP_SIZE - 1) / WARP_SIZE;
 
         shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
         + q_tmax_len  * sizeof(char)
@@ -506,7 +520,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
         + opt_cells_size * sizeof(opt_cell)
 #endif
         ;
-        local_ungapped_alignment_on_diagonal<<<num_target_strs, max(max_target_len, q_len), shared_memory_size>>> (
+        local_ungapped_alignment_on_diagonal<<<num_target_strs, min(max(max_target_len, q_len), MAX_LEN), shared_memory_size>>> (
             SCORE_MATRIX_SIZE,
             q_tmax_len,
 #ifdef REDUCE_ALIGNMENT_RESULT
