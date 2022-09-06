@@ -19,7 +19,6 @@ namespace cg = cooperative_groups;
     #define SHOW_ALIGNMENT_SCORES
 #endif
 
-// #define REDUCE_ON_COLUMNS
 // #define REDUCE_ALIGNMENT_RESULT
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -113,6 +112,7 @@ __device__ void initial_warp_reduce(opt_cell * best_cells, unsigned int tid, int
     int best_score = best_score_param;
     int best_diag_idx = best_diag_idx_param;
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        // todo: handle undefined value !!!!!!!!!!!!! or force the threads to be multiple of 32
         score_tmp = __shfl_down_sync(FULL_MASK, best_score, offset);
         diag_idx_tmp = __shfl_down_sync(FULL_MASK, best_diag_idx, offset);
         if (score_tmp > best_score) {
@@ -201,45 +201,27 @@ __global__ void local_ungapped_alignment(
         }
     }
 
-#ifdef REDUCE_ON_COLUMNS
-    best_cells[tid].score = 0;
-    best_cells[tid].diagonal_idx = USHRT_MAX;
-#else
-    int diagonal_size = t_len + q_len - 1;
-    for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
-        int idx = i * tnum + tid;
-        if (idx < diagonal_size) {
-            best_cells[idx].score = 0;
-            best_cells[idx].diagonal_idx = idx;
-        }
-    }
-#endif
-
     __syncthreads();
-
+    int best_score = 0;
+    int best_diag_idx = 0;
     // now actual alignment algorithm can begin :D
     // todo: test the thrust and cuBLAS library and the reduce method for acquiring extermum in an array
     for (int row = 1; row <= t_len; row++) {
-        // this thread works on column = tid + 1 and q[tid] char
-        int mat_idx = q_cache[tid] * ALPH_SIZE + t_cache[row-1];
+        int col = tid + 1;
+        int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
         byte_type substitution_score = score_matrix_flat[mat_idx];
 #ifdef DEBUG_KERNEL
-        printf("(r%d%c, c%2d%c)%2d\n", row, t_cache[row-1], tid+1, q_cache[tid], substitution_score);
+        printf("(r%d%c, c%2d%c)%2d\n", row, t_cache[row-1], col, q_cache[col], substitution_score);
 #endif
-        int_type current_score = max(0, last_row[tid] + substitution_score);
-        int_type current_diagonal = row - tid + q_len - 2; // row - col + q_len - 1
-        current_row[tid+1] = current_score; // there is no race condition here!
+        int_type current_score = max(0, last_row[col-1] + substitution_score);
+        int_type current_diagonal = row - col + q_len - 1;
+        current_row[col] = current_score; // there is no race condition here!
 
         // each thread works on different diagonal or column (considering columns of threads differ and rows are the same)
         // so there is no race condition here yet either
-#ifdef REDUCE_ON_COLUMNS
-        if (current_score > best_cells[tid].score) {
-            best_cells[tid].score = current_score;
-            best_cells[tid].diagonal_idx = current_diagonal;
-#else
-        if (current_score > best_cells[current_diagonal].score) {
-            best_cells[current_diagonal].score = current_score;
-#endif
+        if (current_score > best_score) {
+            best_score = current_score;
+            best_diag_idx = current_diagonal;
             // here we have a race condition to update the best_overall_score and best_diagonal
 #if !defined REDUCE_ALIGNMENT_RESULT
             atomicMax(&best_overall_score, current_score);
@@ -248,63 +230,24 @@ __global__ void local_ungapped_alignment(
         // to reassure that all current_row cells are updated before using them
         __syncthreads();
 #ifdef DEBUG_KERNEL
-        printf("diag%2d(r%d, c%2d)%2d\n", current_diagonal, row, tid+1, current_score);
+        printf("diag%2d(r%d, c%2d)%2d\n", current_diagonal, row, col, current_score);
 #endif
         // last_row[0] is already zero and there is no need to update the value (btw same can be said for last_row[q_len] considering it will not be used but anyway!)
-        last_row[tid+1] = current_row[tid+1];
+        last_row[col] = current_row[col];
         __syncthreads();
     }
 
 #ifdef REDUCE_ALIGNMENT_RESULT
-    #if defined DEBUG_REDUCE & !defined REDUCE_ON_COLUMNS
-    if (!tid) {
-        printf("before reduction:\n");
-        for (int i = 0; i < diagonal_size; i++) {
-            printf("score:%d, idx:%d\n", best_cells[i].score, best_cells[i].diagonal_idx);
-        }
-    }
-    #endif
-
-    #if !defined REDUCE_ON_COLUMNS
-    // this whole reduction on diagonals complexity time is not o(logn) but it's o(Lt/Lq) + o(logn)
-    for (int i = 0; i < (diagonal_size + tnum - 1) / tnum; i++) {
-        int idx = i * tnum + tid;
-        if (idx < diagonal_size && best_cells[tid].score < best_cells[idx].score) {
-            best_cells[tid].score = best_cells[idx].score;
-            best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
-        }
-    }
-    #endif
-
-    for (int i = (tnum + 1) / 2; i > 0; i = (i+1) / 2) {
-        int idx = tid + i;
-        if (tid < i && idx < tnum) {
-    #ifdef DEBUG_REDUCE
-            printf("(tid:%d, idx:%d| cur_size:%d block_size:%d)\n", tid, idx, i, tnum);
-    #endif
-            if (best_cells[tid].score < best_cells[idx].score) {
-                best_cells[tid].score = best_cells[idx].score;
-                best_cells[tid].diagonal_idx = best_cells[idx].diagonal_idx;
-            }
-        }
-        __syncthreads();
-    #ifdef DEBUG_REDUCE
-        if (!tid) for (int j = 0; j < i; j++) {
-            printf("score:%d, idx:%d\n", best_cells[j].score, best_cells[j].diagonal_idx);
-        }
-    #endif
-        if (i == 1)
-            break;
+    initial_warp_reduce(best_cells, tid, best_score, best_diag_idx);
+    __syncthreads();
+    int array_size = (tnum + WARP_SIZE - 1) / WARP_SIZE;
+    int cur_step = (array_size + 1) / 2;
+    initial_all_reduce(cg::this_thread_block(), best_cells, tid, cur_step, array_size);
+    if (tid < WARP_SIZE) {
+        final_warp_reduce(best_cells, tid, cur_step, array_size);
     }
     // now best_cells[0] holds the maximum best score
-    best_overall_score = best_cells[0].score;
-    #ifdef DEBUG_REDUCE
-        printf("end of reducing from thread %d --> best_diagonal:%d, best_socore:%d\n", tid, best_cells[0].score, best_cells[0].diagonal_idx);
-    #endif
-#else
-    #ifdef DEBUG_KERNEL
-    printf("end of thread %d, best_overall_score: %d\n", tid, best_overall_score);
-    #endif
+    if (!tid) best_overall_score = best_cells[0].score;
 #endif
 
     if (!tid) {
@@ -485,12 +428,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
     // int score_matrix_len = SCORE_MATRIX_SIZE;
     int rows_memory_len = 2 * (q_len + 1); // current row + last row
     int q_tmax_len = (max_target_len + q_len);
-#ifdef REDUCE_ON_COLUMNS
-    int opt_cells_size = q_len; // column_size
-#else
-    int max_diagonal_size = (max_target_len + q_len - 1);
-    int opt_cells_size = max_diagonal_size;
-#endif
+    int opt_cells_size = (q_len + WARP_SIZE - 1) / WARP_SIZE;
     // calculating the maximum needed shared-memory size in bytes
     int shared_memory_size;
     if (on_columns) {

@@ -31,7 +31,7 @@ echo -e "\n#### ON_DIAGONAL method with REDUCTION"
 command2_1="$mynvcc $files $flags -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets 0 0 $query | $out_pipe"
 eval $command2_1 #>> $outfilename
 
-echo -e "\n#### ON_DIAGONAL method with MORE efficient REDUCTION"
+echo -e "\n#### ON_DIAGONAL method with MORE efficient REDUCTION and handling sequences longer than 1024"
 command2_2="$mynvcc $files2 $flags -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets 0 0 $query | $out_pipe"
 eval $command2_2 #>> $outfilename
 
@@ -44,9 +44,9 @@ echo -e "\n#### ON_COLUMNS method with REDUCTION (reduce on COLUMNS)"
 command4="$mynvcc $files $flags -DREDUCE_ON_COLUMNS -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets 0 1 $query | $out_pipe"
 eval $command4 #>> $outfilename
 
-echo -e "\n#### ON_COLUMNS method with REDUCTION (reduce on DIAGONALS)"
-command5="$mynvcc $files $flags -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets 0 1 $query | $out_pipe"
-eval $command5 #>> $outfilename
+# echo -e "\n#### ON_COLUMNS method with REDUCTION (reduce on DIAGONALS)"
+# command5="$mynvcc $files $flags -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets 0 1 $query | $out_pipe"
+# eval $command5 #>> $outfilename
 }
 
 outfilename="PlayGround/benchmark_$(date +"%Y-%m-%d_%H-%M-%S")"
