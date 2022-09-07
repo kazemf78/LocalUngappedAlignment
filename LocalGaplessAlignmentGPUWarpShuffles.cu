@@ -19,6 +19,7 @@ namespace cg = cooperative_groups;
     #define SHOW_ALIGNMENT_SCORES
 #endif
 
+// #define HANDLE_LONG_QUERY
 // #define REDUCE_ALIGNMENT_RESULT
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
@@ -188,11 +189,20 @@ __global__ void local_ungapped_alignment(
         }
     }
 
-    // Note: thread with index i works on column i+1 of alignment matrix and need column i to compute it
-    last_row[tid] = 0;
+    for (int i = 0; i < (q_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < q_len) {
+            last_row[idx] = 0;
+        }
+    }
     // current row does not need initialization!
     
-    q_cache[tid] = query_idx[tid];
+    for (int i = 0; i < (q_len + tnum - 1) / tnum; i++) {
+        int idx = i * tnum + tid;
+        if (idx < q_len) {
+            q_cache[idx] = query_idx[idx];
+        }
+    }
 
     for (int i = 0; i < (t_len + tnum - 1) / tnum; i++) {
         int idx = i * tnum + tid;
@@ -207,7 +217,11 @@ __global__ void local_ungapped_alignment(
     // now actual alignment algorithm can begin :D
     // todo: test the thrust and cuBLAS library and the reduce method for acquiring extermum in an array
     for (int row = 1; row <= t_len; row++) {
+#ifndef HANDLE_LONG_QUERY
         int col = tid + 1;
+#else
+        for (int col = tid + 1; col <= q_len; col += tnum) {
+#endif
         int mat_idx = q_cache[col-1] * ALPH_SIZE + t_cache[row-1];
         byte_type substitution_score = score_matrix_flat[mat_idx];
 #ifdef DEBUG_KERNEL
@@ -227,12 +241,18 @@ __global__ void local_ungapped_alignment(
             atomicMax(&best_overall_score, current_score);
 #endif
         }
+#ifdef HANDLE_LONG_QUERY
+        }
+#endif
         // to reassure that all current_row cells are updated before using them
         __syncthreads();
 #ifdef DEBUG_KERNEL
         printf("diag%2d(r%d, c%2d)%2d\n", current_diagonal, row, col, current_score);
 #endif
         // last_row[0] is already zero and there is no need to update the value (btw same can be said for last_row[q_len] considering it will not be used but anyway!)
+#ifdef HANDLE_LONG_QUERY
+        for (int col = tid + 1; col <= q_len; col += tnum)
+#endif
         last_row[col] = current_row[col];
         __syncthreads();
     }
@@ -428,17 +448,20 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
     // int score_matrix_len = SCORE_MATRIX_SIZE;
     int rows_memory_len = 2 * (q_len + 1); // current row + last row
     int q_tmax_len = (max_target_len + q_len);
-    int opt_cells_size = (q_len + WARP_SIZE - 1) / WARP_SIZE;
+    int opt_cells_size;
     // calculating the maximum needed shared-memory size in bytes
     int shared_memory_size;
+    int block_size;
     if (on_columns) {
+        block_size = min(q_len, MAX_LEN);
+        opt_cells_size = (block_size + WARP_SIZE - 1) / WARP_SIZE;
         shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
         + rows_memory_len * sizeof(int_type)
         + q_tmax_len  * sizeof(char)
         + opt_cells_size * sizeof(opt_cell)
         ;
 
-        local_ungapped_alignment<<<num_target_strs, q_len, shared_memory_size>>> (
+        local_ungapped_alignment<<<num_target_strs, block_size, shared_memory_size>>> (
             SCORE_MATRIX_SIZE,
             rows_memory_len,
             q_tmax_len,
@@ -450,7 +473,8 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
             best_scores
         );
     } else {
-        opt_cells_size = (min(max(max_target_len, q_len), MAX_LEN) + WARP_SIZE - 1) / WARP_SIZE;
+        block_size = min(max(max_target_len, q_len), MAX_LEN);
+        opt_cells_size = (block_size + WARP_SIZE - 1) / WARP_SIZE;
 
         shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
         + q_tmax_len  * sizeof(char)
@@ -458,7 +482,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
         + opt_cells_size * sizeof(opt_cell)
 #endif
         ;
-        local_ungapped_alignment_on_diagonal<<<num_target_strs, min(max(max_target_len, q_len), MAX_LEN), shared_memory_size>>> (
+        local_ungapped_alignment_on_diagonal<<<num_target_strs, block_size, shared_memory_size>>> (
             SCORE_MATRIX_SIZE,
             q_tmax_len,
 #ifdef REDUCE_ALIGNMENT_RESULT
@@ -472,7 +496,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
         );
     }
 #ifdef SHOW_KERNEL_CONF
-    printf("shared_memory_size: %d, num_targets=grid_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", shared_memory_size, num_target_strs, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
+    printf("shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
