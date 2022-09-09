@@ -19,8 +19,12 @@ namespace cg = cooperative_groups;
     #define SHOW_ALIGNMENT_SCORES
 #endif
 
+// #define HANDLE_LONG_SEQUENCE
 // #define HANDLE_LONG_QUERY
 // #define REDUCE_ALIGNMENT_RESULT
+#ifdef HANDLE_LONG_SEQUENCE
+    #define HANDLE_LONG_QUERY
+#endif
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -304,6 +308,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     int t_len = flat_ids[bid + 1] - t_start_idx;
     int diagonal_size = t_len + q_len - 1;
     int actual_diag_size = max(t_len, q_len);
+    int actual_tnum = min(actual_diag_size, tnum);
 
     // dynamically divide the whole shared memory for the shared memory variables
 #ifdef REDUCE_ALIGNMENT_RESULT
@@ -342,9 +347,13 @@ __global__ void local_ungapped_alignment_on_diagonal(
 
     // now actual alignment algorithm can begin :D
     int_type best_score = 0;
-    int best_diag_idx = 0;
+    int best_diag_idx = tid;
+#ifndef HANDLE_LONG_SEQUENCE
+    int diag_idx = tid;
+#else
     for (int i = 0; i < (actual_diag_size + tnum - 1) / tnum; i++) {
         int diag_idx = i * tnum + tid;
+#endif
         int_type current_score = 0;
         if (diag_idx < actual_diag_size) {
             for (int row = max(1, diag_idx - q_len + 2), col = max(1, q_len - diag_idx); row <= t_len && col <= q_len; row++, col++) {
@@ -353,10 +362,11 @@ __global__ void local_ungapped_alignment_on_diagonal(
                 current_score = max(0, current_score + substitution_score);
                 if (current_score > best_score) {
                     best_score = current_score;
+#ifdef HANDLE_LONG_SEQUENCE
                     best_diag_idx = diag_idx;
+#endif
                 }
             }
-        }
         if (diag_idx + actual_diag_size < diagonal_size) {
             diag_idx = diag_idx + actual_diag_size;
             current_score = 0;
@@ -370,7 +380,10 @@ __global__ void local_ungapped_alignment_on_diagonal(
                 }
             }
         }
+        }
+#ifdef HANDLE_LONG_SEQUENCE
     }
+#endif
 
 #ifndef REDUCE_ALIGNMENT_RESULT
     atomicMax(&best_overall_score, best_score);
@@ -378,20 +391,20 @@ __global__ void local_ungapped_alignment_on_diagonal(
 #else
     // here we first reduce results on each warp seperately with using warp_shuffle operations
     // this can divide the length of best_cells by 32 and save shared_memory
-    if (tid < actual_diag_size) { // no need to check for tid < tnum which is redundant
+    if (tid < actual_tnum) {
         initial_warp_reduce(best_cells, tid, best_score, best_diag_idx);
     }
     __syncthreads();
     #if defined DEBUG_REDUCE
     if (!tid) {
-        for (int i = 0; i < (min(actual_diag_size, tnum) + WARP_SIZE - 1) / WARP_SIZE; i++) {
+        for (int i = 0; i < (actual_tnum + WARP_SIZE - 1) / WARP_SIZE; i++) {
             printf("i:%d, score:%d, idx:%d\n", i, best_cells[i].score, best_cells[i].diagonal_idx);
         }
     }
     #endif
     // what we're doing here is that we divide the last 5 iterations of this loop to avoid stalling the majority of the threads that are idle
     // instead only the first warp will resume reducing seperately
-    int array_size = (min(actual_diag_size, tnum) + WARP_SIZE - 1) / WARP_SIZE;
+    int array_size = (actual_tnum + WARP_SIZE - 1) / WARP_SIZE;
     int cur_step = (array_size + 1) / 2;
     initial_all_reduce(cg::this_thread_block(), best_cells, tid, cur_step, array_size);
     if (tid < WARP_SIZE) {
