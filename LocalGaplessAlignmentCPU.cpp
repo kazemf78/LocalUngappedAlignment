@@ -3,7 +3,6 @@
 #include "ScoreMatrix.h"
 #include "LocalGaplessAlignmentCPU.h"
 
-using namespace std;
 
 #define MAX_LEN 1024
 #define debug(A) cout << #A << ": " << A << endl
@@ -13,7 +12,7 @@ using namespace std;
 // #define SHOW_RESULTS
 
 
-alignment_result * local_ungapped_alignment(string query, string target) {
+alignment_result * local_ungapped_alignment(std::string query, std::string target) {
     int q_len = query.size(), t_len = target.size();
     #ifdef DEBUG
     cout << "query_length = " << q_len << ", target_length = " << t_len << endl;
@@ -72,7 +71,7 @@ alignment_result * local_ungapped_alignment(string query, string target) {
 }
 
 // this function and local_ungapped_alignment are the same function but only memory usage differs
-alignment_result * local_ungapped_alignment_less_memory(string query, string target) {
+alignment_result * local_ungapped_alignment_less_memory(std::string query, std::string target) {
     int q_len = query.size(), t_len = target.size();
     #ifdef DEBUG
     cout << "query_length = " << q_len << ", target_length = " << t_len << endl;
@@ -132,7 +131,7 @@ alignment_result * local_ungapped_alignment_less_memory(string query, string tar
     return res;
 }
 
-void measure_time(string query, vector<string> targets, function<alignment_result* (string, string)> func, bool verbose, int number_of_calls=20) {
+void measure_time(std::string query, vector<std::string> targets, function<alignment_result* (std::string, std::string)> func, bool verbose=true, int number_of_calls=10) {
     clock_t start_clock, end_clock;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
@@ -145,15 +144,32 @@ void measure_time(string query, vector<string> targets, function<alignment_resul
         long execution_clocks = end_clock - start_clock;
         maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
         sum_clocks += execution_clocks;
-        if (verbose) cout << "execution clocks: " << execution_clocks << endl; // divide by CLOCKS_PER_SEC if actual time is needed
+        if (verbose) {
+            printf("num_targets: %d, q_len: %d\n", (int)targets.size(), (int)query.size());
+            cout << "execution clocks: " << execution_clocks  << ", TIME: " <<  double(execution_clocks) / CLOCKS_PER_SEC << endl;
+        }
     }
     debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
 }
 
-int main() {
-    vector<string> queries, targets;
-    init_input_from_file("TestSamples/queries.txt", queries, false);
-    init_input_from_file("TestSamples/targets.txt", targets, true);
+int main(int argc, char** argv) {
+    vector<std::string> queries, targets;
+
+    std::string target_path = "TestSamples/targets.txt";
+    std::string query_path = "TestSamples/queries.txt";
+    bool is_target_fasta = false;
+
+    if (argc > 1) {
+        target_path = argv[1];
+        if (argc > 2) {
+            if(std::string(argv[2]) == "0") is_target_fasta = false;
+            if (argc > 3) {
+                query_path = argv[3];
+            }
+        }
+    }
+    init_input_from_file(query_path, queries, false);
+    init_input_from_file(target_path, targets, is_target_fasta);
 #ifdef DEBUG
     for (auto &query: queries) {
         cout << query << endl;
@@ -166,15 +182,15 @@ int main() {
     init_score_matrix();
 
 #ifndef SHOW_RESULTS
-    measure_time(queries[0], targets, &local_ungapped_alignment, false);
-    measure_time(queries[0], targets, &local_ungapped_alignment_less_memory, false);
+    measure_time(queries[0], targets, &local_ungapped_alignment_less_memory, true, 10);
 #else
-    string q = queries[0];
+    std::string q = queries[0];
     for (auto &t: targets) {
         alignment_result *res = local_ungapped_alignment_less_memory(q, t);
         int lq = q.size(), lt = t.size();
         cout << q.substr(0, 10) << "," << t.substr(0, 10);
         printf("(%4d,%4d): %4d\n", lq, lt, res->best_score);
+        // printf("(%4d,%4d): %4d --> %d\n", lq, lt, res->best_score, res->best_diagonal);
      }
 #endif
     return 0;

@@ -553,7 +553,7 @@ int main(int argc, char** argv) {
     // only string "0" can change 2nd and 3rd arguments to "not fasta" and "not on_column" (i.e "on_diagonal")
     std::string target_path = "TestSamples/targets.txt";
     std::string query_path = "TestSamples/queries.txt";
-    bool is_target_fasta = true;
+    bool is_target_fasta = false;
     bool on_columns = true;
     if (argc > 1) {
         target_path = argv[1];
