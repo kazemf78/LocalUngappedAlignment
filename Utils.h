@@ -21,4 +21,4 @@ typedef struct {
     opt_cell* best_cells;
 } alignment_result;
 
-void init_input_from_file(string, vector<string>&, bool);
+void init_input_from_file(string, vector<string>&, bool, bool=true);
