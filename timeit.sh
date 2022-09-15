@@ -5,7 +5,7 @@
 
 f () {
 nvcc_flags="-arch=sm_50"
-# these are for the cases that target_arch is NOT "armv7l aarch64 sbsa" [arch can be known with "uname -m"] [35 & 37 are excluded from the list for now because of deprecation!]
+# these are for the cases that target_arch is NOT "armv7l aarch64 sbsa" [arch can be known with "uname -m"]
 general_arch_nums="35 37 50 52 60 61 70 75 80 86"
 for num in $general_arch_nums; do nvcc_flags_general+="-gencode arch=compute_$num,code=sm_$num "; done
 mynvcc="nvcc $nvcc_flags_general"
@@ -32,8 +32,9 @@ base_command="nvcc {nvcc_flags} $cu_main_file $sup_files $flags {sup_flags} -o $
 echo "BASE_COMMAND: $base_command"
 
 echo "Time: $(date +"%Y-%m-%d_%H-%M-%S")"
-sup_flags=("-DHANDLE_LONG_SEQUENCE")
-if [ ! -z "$4" ] && [ "$4" = "0" ]; then sup_flags=("" "-DHANDLE_LONG_SEQUENCE"); fi
+sup_flags=("")
+# sup_flags=("-DHANDLE_LONG_SEQUENCE")
+# if [ ! -z "$4" ] && [ "$4" = "0" ]; then sup_flags=("" "-DHANDLE_LONG_SEQUENCE"); fi
 
 for sup_flag in "${sup_flags[@]}"
 do
