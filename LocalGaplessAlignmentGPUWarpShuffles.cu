@@ -447,7 +447,7 @@ __global__ void local_ungapped_alignment_on_diagonal(
     }
 }
 
-void call_kernel(const std::string query, const vector<std::string>& targets, bool on_columns=true) {
+void call_kernel(const std::string query, const vector<std::string>& targets, bool on_columns=true, int_type** scores_to_return_addr=NULL) {
 
 /* some todos for more efficiency:
     - merge minor memory transactions
@@ -532,12 +532,19 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
             best_scores
         );
     }
-#ifdef SHOW_KERNEL_CONF
+#if defined SHOW_KERNEL_CONF && !defined BENCHMARK
     printf("shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
-#ifdef SHOW_ALIGNMENT_SCORES
+#if defined BENCHMARK
+    *scores_to_return_addr = best_scores;
+    #if defined DEBUG
+    for (int i = 0; i < num_target_strs; i++) {
+        cout << query << " " << targets[i] << " " << best_scores[i] << endl;
+    }
+    #endif
+#elif defined SHOW_ALIGNMENT_SCORES
     cout << "final scores:" << endl;
     for (int i = 0; i < num_target_strs; i++) {
         cout << query.substr(0, 10) << "," << targets[i].substr(0, 10);
@@ -547,7 +554,9 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
     // freeing device memory
     free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
     cudaFree(d_query_str_idx);
+#if !defined BENCHMARK
     cudaFree(best_scores);
+#endif
 }
 
 void measure_kernel_time(const std::string query, const vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
@@ -569,6 +578,10 @@ void measure_kernel_time(const std::string query, const vector<std::string>& tar
     debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
 }
 
+bool sort_by_score(const std::tuple<std::string, std::string, int>& a, const std::tuple<std::string, std::string, int>& b) {
+    return (get<2>(a) > get<2>(b));
+}
+
 int main(int argc, char** argv) {
     vector<string> queries, targets;
     init_score_matrix();
@@ -578,23 +591,43 @@ int main(int argc, char** argv) {
     std::string target_path = "TestSamples/targets.txt";
     std::string query_path = "TestSamples/queries.txt";
     bool is_target_fasta = false;
+    bool is_query_fasta = false;
     bool on_columns = true;
     if (argc > 1) {
         target_path = argv[1];
         if (argc > 2) {
-            if(std::string(argv[2]) == "0") is_target_fasta = false;
+            if(std::string(argv[2]) == "1") is_target_fasta = true;
             if (argc > 3) {
                 if (std::string(argv[3]) == "0") on_columns = false;
                 if (argc > 4) {
                     query_path = argv[4];
+                    if (argc > 5) {
+                        if(std::string(argv[2]) == "1") is_query_fasta = true;
+                    }
                 }
             }
         }
     }
-    init_input_from_file(query_path, queries, false);
+    init_input_from_file(query_path, queries, is_query_fasta);
     init_input_from_file(target_path, targets, is_target_fasta);
 
-#ifdef DEBUG
+#if defined BENCHMARK
+    int_type* scores_ret;
+    int num_target_strs = targets.size();
+
+    call_kernel(queries[0], targets, on_columns, &scores_ret);
+    #if defined DEBUG && defined SORT_RESULTS
+    vector<std::tuple<std::string, std::string, int>> results;
+    for (int i = 0; i < num_target_strs; i++) {
+        results.push_back(make_tuple(queries[0], targets[i], scores_ret[i]));
+    }
+    std::sort(results.begin(), results.end(), sort_by_score);
+    for (auto &tuple: results) {
+        cout << get<0>(tuple) << " " << get<1>(tuple) << " " << get<2>(tuple) << endl;
+    }
+    #endif
+    cudaFree(scores_ret);
+#elif defined DEBUG
     call_kernel(queries[0], targets, on_columns);
 #else
     measure_kernel_time(queries[0], targets, on_columns, true, 10);

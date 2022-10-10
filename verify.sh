@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# NOTE: the last component of the path can't be a symlink and NO "cd" should have happened before this!
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+cd $SCRIPT_DIR
+
 # ARGUMENTS for this script: 1. main_cuda_file, 2. targets_file, 3. query_file (input files should have sequences in each line and not be fasta formatted!)
 mynvcc="nvcc -arch=sm_50"
 sup_files="Utils.cpp ScoreMatrix.cpp"
@@ -34,11 +38,14 @@ start=$(date +%s.%N)
 flags="$flags -DDEBUG -DREDUCE_ALIGNMENT_RESULT"
 command1="$mynvcc $cu_main_file $sup_files $flags -o $obj_file && ./$obj_file $targets 0 0 $query"
 command2="$mynvcc $cu_main_file $sup_files $flags -o $obj_file && ./$obj_file $targets 0 1 $query"
+echo "Running on GPU with on_diagonals method..."
 eval $command1 > $tmp_file1
+echo "Running on GPU with on_columns method..."
 eval $command2 > $tmp_file2
 
 flags="-DSHOW_RESULTS"
 command3="g++ $cpp_main_file $sup_files $flags -o $obj_file && ./$obj_file $targets 0 $query"
+echo "Running on CPU..."
 eval $command3 > $tmp_file3
 
 diff13=$(diff $tmp_file3 <(tail -n +3 $tmp_file1) | wc -l)

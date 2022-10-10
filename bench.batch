@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH -A all
+#SBATCH -p gpu
+#SBATCH -t 00:12:00
+#SBATCH -o "tmp.log"
+#SBATCH -G gtx1080:1
+
+
+module purge
+module load cuda/11.2.2
+
+// targets="~/data/bulk_lt1024_tiny.txt"
+targets="~/data/bulk_afdb_all.txt"
+query="~/data/bulk_query.txt"
+
+nvcc --version
+echo -e "\n"
+if [ ! -z $1 ]
+  then
+    gpu_model=$1
+  else
+    gpu_model=$(~/deviceQuery | grep "Device 0" | cut -d":" -f2 | xargs | sed 's/ /_/g')
+fi
+
+~/deviceQuery
+# cd LocalUngappedAlignment
+# nvcc -gencode arch=compute_50,code=sm_50 -gencode arch=compute_52,code=sm_52 -gencode arch=compute_60,code=sm_60 -gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 LocalGaplessAlignmentGPUWarpShuffles.cu Utils.cpp ScoreMatrix.cpp -lineinfo -std=c++11 -Wno-deprecated-gpu-targets -DHANDLE_LONG_SEQUENCE -DREDUCE_ALIGNMENT_RESULT -o exe_Quadro_RTX_5000.out && ./exe_Quadro_RTX_5000.out /home/users/m.faghihkhorasani/data/bulk_tiny.txt 0 0 /home/users/m.faghihkhorasani/data/bulk_query.txt | tail -5 | sed '2d'
+# bash ~/LocalUngappedAlignment/timeit.sh ~/data/bulk_tiny.txt ~/data/bulk_query.txt "$gpu_model"
+bash ~/LocalUngappedAlignment/timeit.sh $targets $query "$gpu_model"
+
+# long_date=$(date +"%Y-%m-%d_%H-%M-%S"); for gpu in $(sinfo -p gpu --format=%G | cut -d":" -f2 | sed '1d' | awk '!a[$0]++'); do sbatch -G $gpu -o "log/$gpu-$long_date.log" bench.batch "$gpu-back-from#"; done
+# for gpu in "rtx5000" "v100"; do sbatch -G $gpu -o "log/$gpu.log" bench.batch $gpu; done
