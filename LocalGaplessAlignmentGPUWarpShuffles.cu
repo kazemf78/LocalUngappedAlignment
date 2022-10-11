@@ -608,8 +608,16 @@ int main(int argc, char** argv) {
             }
         }
     }
+#if defined BENCHMARK
+    vector<string> query_ids, target_ids;
+    target_path = "TestSamples/targets.fasta";
+    query_path = "TestSamples/queries.fasta";
+    init_input_from_fasta_file_with_id(query_path, queries, query_ids);
+    init_input_from_fasta_file_with_id(target_path, targets, target_ids);
+#else
     init_input_from_file(query_path, queries, is_query_fasta);
     init_input_from_file(target_path, targets, is_target_fasta);
+#endif
 
 #if defined BENCHMARK
     int_type* scores_ret;
@@ -619,7 +627,7 @@ int main(int argc, char** argv) {
     #if defined DEBUG && defined SORT_RESULTS
     vector<std::tuple<std::string, std::string, int>> results;
     for (int i = 0; i < num_target_strs; i++) {
-        results.push_back(make_tuple(queries[0], targets[i], scores_ret[i]));
+        results.push_back(make_tuple(query_ids[0], target_ids[i], scores_ret[i]));
     }
     std::sort(results.begin(), results.end(), sort_by_score);
     for (auto &tuple: results) {

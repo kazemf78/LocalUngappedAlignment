@@ -5,7 +5,7 @@
 #define int_type unsigned short
 #define byte_type char
 
-using namespace std;
+// using namespace std;
 
 typedef struct {
     // int_type row = 0;
@@ -21,4 +21,6 @@ typedef struct {
     opt_cell* best_cells;
 } alignment_result;
 
-void init_input_from_file(string, vector<string>&, bool, bool=true);
+void init_input_from_file(std::string, std::vector<std::string>&, bool, bool=true);
+// void init_input_from_fasta_file_with_id(std::string, std::vector<std::tuple<std::string, std::string>>&, bool=true);
+void init_input_from_fasta_file_with_id(std::string, std::vector<std::string>&, std::vector<std::string>&, bool=true);
