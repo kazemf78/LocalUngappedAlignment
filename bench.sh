@@ -17,9 +17,9 @@ flags="-lineinfo -std=c++11 -Wno-deprecated-gpu-targets" # suppress warning for 
 obj_file="exe_$gpu_model.out"
 out_pipe="tail -5 | sed '2d'"
 # exe_args="TestSamples/bulk_tiny.txt 0 0 TestSamples/bulk_query.txt"
-targets="TestSamples/targets.txt"
+targets="TestSamples/targets.fasta"
 is_target_fasta="0"
-query="TestSamples/queries.txt"
+query="TestSamples/queries.fasta"
 is_query_fasta="0"
 
 if [ ! -z "$1" ]
@@ -35,17 +35,20 @@ base_command="nvcc {nvcc_flags} $cu_main_file $sup_files $flags {sup_flags} -o $
 echo "BASE_COMMAND: $base_command"
 
 echo "Time: $(date +"%Y-%m-%d_%H-%M-%S")"
-sup_flags=("-DBENCHMARK -DDEBUG")
+sup_flags=("-DBENCHMARK -DDEBUG -DSORT_RESULTS_LIMITED")
 # sup_flags=("-DHANDLE_LONG_SEQUENCE")
 # if [ ! -z "$4" ] && [ "$4" = "0" ]; then sup_flags=("" "-DHANDLE_LONG_SEQUENCE"); fi
 
 for sup_flag in "${sup_flags[@]}"
 do
 out_pipe="sort -k3 -r"
+out_pipe=""
 if [ ! -z "$sup_flag" ]; then echo -e "\n---- The current ADDITIONAL FLAG is: $sup_flag ----"; fi
 
 echo -e "\n#### ON_DIAGONAL method with REDUCTION"
-command2="$mynvcc $cu_main_file $sup_files $flags $sup_flag -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets $is_target_fasta 0 $query $is_query_fasta | $out_pipe"
+echo $targets $query
+command2="$mynvcc $cu_main_file $sup_files $flags $sup_flag -DREDUCE_ALIGNMENT_RESULT -o $obj_file && ./$obj_file $targets $is_target_fasta 0 $query $is_query_fasta"
+if [ ! -z $out_pipe ]; then command2="$command2 | $out_pipe"; fi
 echo $command2
 eval $command2 #>> $outfilename
 
@@ -60,7 +63,7 @@ if [ ! -z "$3" ]
   then
     gpu_model="$3"
 fi
-outfilename="PlayGround/benchmark_$(date +"%Y-%m-%d_%H-%M-%S")_$gpu_model"
+outfilename="PlayGround_/benchmark_$(date +"%Y-%m-%d_%H-%M-%S")_$gpu_model"
 echo $gpu_model | tee $outfilename
 
 start=$(date +%s.%N)

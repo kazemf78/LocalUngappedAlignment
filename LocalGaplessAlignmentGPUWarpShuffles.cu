@@ -10,6 +10,8 @@ namespace cg = cooperative_groups;
 #define FULL_MASK 0xffffffff
 #define WARP_SIZE 32
 #define debug(A) cout << #A << ": " << A << endl
+#define ull unsigned long long
+#define BENCH_CAP_VAL 5
 
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
@@ -21,6 +23,10 @@ namespace cg = cooperative_groups;
 
 // #define HANDLE_LONG_QUERY
 // #define REDUCE_ALIGNMENT_RESULT
+// #define BENCHMARK
+// #define DEBUG_BENCH
+// #define SORT_RESULTS
+// #define SORT_RESULTS_LIMITED
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -447,6 +453,19 @@ __global__ void local_ungapped_alignment_on_diagonal(
     }
 }
 
+ull total_global_memory(int dev = 0) {
+    int devCount = 0;
+    gpuErrchk(cudaGetDeviceCount(&devCount));
+    if (dev < devCount) {
+        cudaSetDevice(dev);
+        cudaDeviceProp deviceProp;
+        cudaGetDeviceProperties(&deviceProp, dev);
+        return deviceProp.totalGlobalMem;
+    } else {
+        return 0;
+    }
+}
+
 void call_kernel(const std::string query, const vector<std::string>& targets, bool on_columns=true, int_type** scores_to_return_addr=NULL) {
 
 /* some todos for more efficiency:
@@ -476,6 +495,13 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
     cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
     cudaMallocManaged(&best_scores, num_target_strs * sizeof(int_type));
+    int global_memory_size = q_len + sizeof(char)
+    + sum_target_len * sizeof(char)
+    + (num_target_strs + 1) * sizeof(int)
+    + num_target_strs * sizeof(int_type)
+    ;
+    // todo: do sth if memory_size exceeds global_memory and improve this next log!
+    printf("total_global_memory: %llu\n", total_global_memory(0));
     // be sure to have called init_score_matrix() before using score matrix
     // todo: do sth about this init_score_matrix necessity
     cudaMemcpyToSymbol(_score_matrix, score_matrix_flattened, SCORE_MATRIX_SIZE * sizeof(byte_type));
@@ -532,14 +558,14 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
             best_scores
         );
     }
-#if defined SHOW_KERNEL_CONF && !defined BENCHMARK
-    printf("shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
+#if defined SHOW_KERNEL_CONF // && !defined BENCHMARK
+    printf("global_memory_size: %d, shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", global_memory_size, shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
 #if defined BENCHMARK
     *scores_to_return_addr = best_scores;
-    #if defined DEBUG
+    #if defined DEBUG_BENCH
     for (int i = 0; i < num_target_strs; i++) {
         cout << query << " " << targets[i] << " " << best_scores[i] << endl;
     }
@@ -610,10 +636,11 @@ int main(int argc, char** argv) {
     }
 #if defined BENCHMARK
     vector<string> query_ids, target_ids;
-    target_path = "TestSamples/targets.fasta";
-    query_path = "TestSamples/queries.fasta";
+    // target_path = "TestSamples/targets.fasta";
+    // query_path = "TestSamples/queries.fasta";
     init_input_from_fasta_file_with_id(query_path, queries, query_ids);
     init_input_from_fasta_file_with_id(target_path, targets, target_ids);
+    printf("number of queries: %d, number of targets: %d\n", (int)queries.size(), (int)targets.size());
 #else
     init_input_from_file(query_path, queries, is_query_fasta);
     init_input_from_file(target_path, targets, is_target_fasta);
@@ -622,16 +649,54 @@ int main(int argc, char** argv) {
 #if defined BENCHMARK
     int_type* scores_ret;
     int num_target_strs = targets.size();
-
-    call_kernel(queries[0], targets, on_columns, &scores_ret);
-    #if defined DEBUG && defined SORT_RESULTS
+    int num_query_strs = queries.size();
+    clock_t start_clock, end_clock;
+    long execution_clocks;
     vector<std::tuple<std::string, std::string, int>> results;
-    for (int i = 0; i < num_target_strs; i++) {
-        results.push_back(make_tuple(query_ids[0], target_ids[i], scores_ret[i]));
+    for (int i = 0; i < num_query_strs; i++) {
+        start_clock = clock();
+        call_kernel(queries[i], targets, on_columns, &scores_ret);
+        end_clock = clock();
+        execution_clocks = end_clock - start_clock;
+    #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        cout << "kernel execution clocks: " << execution_clocks << endl;
+        start_clock = clock();
+        #if defined SORT_RESULTS
+        for (int j = 0; j < num_target_strs; j++) {
+            results.push_back(std::make_tuple(query_ids[i], target_ids[j], scores_ret[j]));
+        }
+        #else
+        vector<std::tuple<std::string, std::string, int>> results_tmp;
+        for (int j = 0; j < num_target_strs; j++) {
+            results_tmp.push_back(std::make_tuple(query_ids[i], target_ids[j], scores_ret[j]));
+        }
+        std::sort(results_tmp.begin(), results_tmp.end(), sort_by_score);
+        for (int j = 0; j < min(num_target_strs, BENCH_CAP_VAL); j++) {
+            results.push_back(results_tmp[j]);
+        }
+        #endif
+        end_clock = clock();
+        execution_clocks = end_clock - start_clock;
+        cout << "vector contruction execution clocks: " << execution_clocks << endl;
+    #endif
     }
+    #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+    start_clock = clock();
     std::sort(results.begin(), results.end(), sort_by_score);
-    for (auto &tuple: results) {
-        cout << get<0>(tuple) << " " << get<1>(tuple) << " " << get<2>(tuple) << endl;
+    end_clock = clock();
+    execution_clocks = end_clock - start_clock;
+    cout << "sort execution clocks: " << execution_clocks << endl;
+    int results_size = results.size(); // in SHOW_RESULT MODE it equals num_target_strs * num_query_strs
+    for (int i = 0; i < min(results_size, BENCH_CAP_VAL); i++) {
+        std::tuple<std::string, std::string, int> t = results[i];
+        cout << get<0>(t) << " " << get<1>(t) << " " << get<2>(t) << endl;
+    }
+    // todo: this is hardcode!
+    string out_name = "PlayGround_/full_output_" + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
+    ofstream out_file(out_name);
+    for (int i = 0; i < results_size; i++) {
+        std::tuple<std::string, std::string, int> tuple = results[i];
+        out_file << get<0>(tuple) << " " << get<1>(tuple) << " " << get<2>(tuple) << endl;
     }
     #endif
     cudaFree(scores_ret);
