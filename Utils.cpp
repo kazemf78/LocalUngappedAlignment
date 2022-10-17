@@ -9,6 +9,21 @@
 
 // #define DEBUG
 
+std::vector<std::string> split(std::string s, std::string delimiter) {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+        token = s.substr (pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back (token);
+    }
+
+    res.push_back(s.substr (pos_start));
+    return res;
+}
+
 void adjust_length(std::string& str) {
     int mod32 = str.size() % 32;
     if (mod32 > 0) {
@@ -59,9 +74,13 @@ void init_input_from_fasta_file_with_id(std::string filename, std::vector<std::s
                 results.push_back(cur_line);
                 result_ids.push_back(cur_id);
         } else {
-            int first_space = cur_line.find(" ");
-            if (first_space != -1) {
-                cur_id = cur_line.substr(1, first_space);
+            size_t first_space = cur_line.find(" ");
+            if (first_space != std::string::npos) {
+                char sep = '|';
+                // cur_id = cur_line.substr(1, first_space);
+                cur_line.erase(remove(cur_line.begin(), cur_line.end(), sep), cur_line.end());
+                std::vector<std::string> strs = split(cur_line.substr(1), " ");
+                cur_id = strs[0] + sep + strs[1] + sep + strs[3];
             } else {
                 cur_id = cur_line.substr(1);
             }

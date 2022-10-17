@@ -11,7 +11,7 @@ namespace cg = cooperative_groups;
 #define WARP_SIZE 32
 #define debug(A) cout << #A << ": " << A << endl
 #define ull unsigned long long
-#define BENCH_CAP_VAL 5
+#define BENCH_CAP_VAL 200
 
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
@@ -691,12 +691,18 @@ int main(int argc, char** argv) {
         std::tuple<std::string, std::string, int> t = results[i];
         cout << get<0>(t) << " " << get<1>(t) << " " << get<2>(t) << endl;
     }
-    // todo: this is hardcode!
-    string out_name = "PlayGround_/full_output_" + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
+    // todo: this is hardcode! (chrono and ctime are needed and are included in bits/stc++)
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    std::ostringstream oss_time;
+    oss_time << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S_");
+    string out_name = "PlayGround_/full_output_" + oss_time.str() + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
+    debug(out_name);
     ofstream out_file(out_name);
     for (int i = 0; i < results_size; i++) {
         std::tuple<std::string, std::string, int> tuple = results[i];
-        out_file << get<0>(tuple) << " " << get<1>(tuple) << " " << get<2>(tuple) << endl;
+        std::string sep = "|";
+        out_file << split(get<0>(tuple), sep)[2] << " " << split(get<1>(tuple), sep)[2] << " " << get<2>(tuple) << endl;
     }
     #endif
     cudaFree(scores_ret);

@@ -21,6 +21,7 @@ typedef struct {
     opt_cell* best_cells;
 } alignment_result;
 
+std::vector<std::string> split(std::string, std::string);
 void init_input_from_file(std::string, std::vector<std::string>&, bool, bool=true);
 // void init_input_from_fasta_file_with_id(std::string, std::vector<std::tuple<std::string, std::string>>&, bool=true);
 void init_input_from_fasta_file_with_id(std::string, std::vector<std::string>&, std::vector<std::string>&, bool=true);
