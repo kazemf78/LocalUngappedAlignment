@@ -77,10 +77,12 @@ void init_input_from_fasta_file_with_id(std::string filename, std::vector<std::s
             size_t first_space = cur_line.find(" ");
             if (first_space != std::string::npos) {
                 char sep = '|';
-                // cur_id = cur_line.substr(1, first_space);
-                cur_line.erase(remove(cur_line.begin(), cur_line.end(), sep), cur_line.end());
-                std::vector<std::string> strs = split(cur_line.substr(1), " ");
-                cur_id = strs[0] + sep + strs[1] + sep + strs[3];
+                cur_id = cur_line.substr(1, first_space-1);
+                std::string tmp_line = cur_line.substr(first_space+1);
+                std::vector<std::string> strs = split(tmp_line, " |");
+                std::replace(strs[0].begin(), strs[0].end(), ' ', ',');
+                std::replace(strs[2].begin(), strs[2].end(), ' ', ',');
+                cur_id += sep + strs[0] + sep + strs[2];
             } else {
                 cur_id = cur_line.substr(1);
             }

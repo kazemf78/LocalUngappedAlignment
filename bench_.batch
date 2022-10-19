@@ -8,6 +8,7 @@
 
 module purge
 module load cuda/11.2.2
+module load gcc/8.4
 
 # targets="~/data/bulk_lt1024_tiny.txt"
 # targets="~/data/bulk_afdb_all.txt"
@@ -16,9 +17,11 @@ module load cuda/11.2.2
 targets="~/mmseqs2-benchmark-pub/db/targetannotation.fasta"
 # query="~/mmseqs2-benchmark-pub/db/query.fasta"
 # query="~/data/bench_tootiny_query.fasta"
-query="~/data/bench_tiny_query2.fasta"
+# query="~/data/bench_tiny_query2.fasta"
+query="~/data/bench_tiny_query_part03.fasta"
 
 nvcc --version
+gcc --version
 echo -e "\n"
 if [ ! -z $1 ]
   then

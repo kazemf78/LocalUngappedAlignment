@@ -9,7 +9,7 @@ namespace cg = cooperative_groups;
 #define MAX_LEN 1024
 #define FULL_MASK 0xffffffff
 #define WARP_SIZE 32
-#define debug(A) cout << #A << ": " << A << endl
+#define debug(A) std::cout << #A << ": " << A << std::endl
 #define ull unsigned long long
 #define BENCH_CAP_VAL 200
 
@@ -43,7 +43,7 @@ extern __shared__ int shared_memory[];
 
 __constant__ byte_type _score_matrix[ALPH_SIZE * ALPH_SIZE];
 
-void allcoate_strings_on_device_flattened(const vector<std::string>& strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
+void allcoate_strings_on_device_flattened(const std::vector<std::string>& strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
     std::string flat_temp; int* flat_ids; char * flat_str;
     flat_ids = (int *) malloc((num_strs + 1) * sizeof(int));
     int cur_ptr = 0;
@@ -73,7 +73,7 @@ void free_strings_on_device_flattened(char* d_fstr, int* d_fids) {
     cudaFree(d_fids);
 }
 
-void allocate_strings_on_device_ptr2ptr(const vector<std::string>& strings, char *** d_str_ptrs_addr, char *** d_temp_strs_addr, int num_strs) {
+void allocate_strings_on_device_ptr2ptr(const std::vector<std::string>& strings, char *** d_str_ptrs_addr, char *** d_temp_strs_addr, int num_strs) {
     cudaMalloc(d_str_ptrs_addr, num_strs * sizeof(char *));
     *d_temp_strs_addr = (char **) malloc(num_strs * sizeof(char*));
     char** d_str_ptrs = *d_str_ptrs_addr;
@@ -466,7 +466,7 @@ ull total_global_memory(int dev = 0) {
     }
 }
 
-void call_kernel(const std::string query, const vector<std::string>& targets, bool on_columns=true, int_type** scores_to_return_addr=NULL) {
+void call_kernel(const std::string query, const std::vector<std::string>& targets, bool on_columns=true, int_type** scores_to_return_addr=NULL) {
 
 /* some todos for more efficiency:
     - merge minor memory transactions
@@ -585,7 +585,7 @@ void call_kernel(const std::string query, const vector<std::string>& targets, bo
 #endif
 }
 
-void measure_kernel_time(const std::string query, const vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
+void measure_kernel_time(const std::string query, const std::vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
     clock_t start_clock, end_clock;
     long maximum_clocks = 0, minimum_clocks = LLONG_MAX, sum_clocks = 0;
 
@@ -599,17 +599,17 @@ void measure_kernel_time(const std::string query, const vector<std::string>& tar
         long execution_clocks = end_clock - start_clock;
         maximum_clocks = max(maximum_clocks, execution_clocks), minimum_clocks = min(minimum_clocks, execution_clocks);
         sum_clocks += execution_clocks;
-        if (verbose) cout << "execution clocks: " << execution_clocks << endl; // divide by CLOCKS_PER_SEC if actual time is needed
+        if (verbose) std::cout << "execution clocks: " << execution_clocks << std::endl; // divide by CLOCKS_PER_SEC if actual time is needed
     }
-    debug(maximum_clocks); debug(minimum_clocks); cout << "avg_clocks: " << sum_clocks / number_of_calls << endl;
+    debug(maximum_clocks); debug(minimum_clocks); std::cout << "avg_clocks: " << sum_clocks / number_of_calls << std::endl;
 }
 
 bool sort_by_score(const std::tuple<std::string, std::string, int>& a, const std::tuple<std::string, std::string, int>& b) {
-    return (get<2>(a) > get<2>(b));
+    return (std::get<2>(a) > std::get<2>(b));
 }
 
 int main(int argc, char** argv) {
-    vector<string> queries, targets;
+    std::vector<std::string> queries, targets;
     init_score_matrix();
     // arguments are optional and the default ones are targets=TestSamples/targets.txt, is_fasta=true, on_columns=true, query=TestSamples/queries.txt[0]
     // the 1s argument tells the file path, the 2nd one tells if target file is fasta, the 3rd determines alignment method (on-columns or on-diagonals) and the 4th tell query path
@@ -635,7 +635,7 @@ int main(int argc, char** argv) {
         }
     }
 #if defined BENCHMARK
-    vector<string> query_ids, target_ids;
+    std::vector<std::string> query_ids, target_ids;
     // target_path = "TestSamples/targets.fasta";
     // query_path = "TestSamples/queries.fasta";
     init_input_from_fasta_file_with_id(query_path, queries, query_ids);
@@ -652,21 +652,21 @@ int main(int argc, char** argv) {
     int num_query_strs = queries.size();
     clock_t start_clock, end_clock;
     long execution_clocks;
-    vector<std::tuple<std::string, std::string, int>> results;
+    std::vector<std::tuple<std::string, std::string, int>> results;
     for (int i = 0; i < num_query_strs; i++) {
         start_clock = clock();
         call_kernel(queries[i], targets, on_columns, &scores_ret);
         end_clock = clock();
         execution_clocks = end_clock - start_clock;
     #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
-        cout << "kernel execution clocks: " << execution_clocks << endl;
+        std::cout << "kernel execution clocks: " << execution_clocks << std::endl;
         start_clock = clock();
         #if defined SORT_RESULTS
         for (int j = 0; j < num_target_strs; j++) {
             results.push_back(std::make_tuple(query_ids[i], target_ids[j], scores_ret[j]));
         }
         #else
-        vector<std::tuple<std::string, std::string, int>> results_tmp;
+        std::vector<std::tuple<std::string, std::string, int>> results_tmp;
         for (int j = 0; j < num_target_strs; j++) {
             results_tmp.push_back(std::make_tuple(query_ids[i], target_ids[j], scores_ret[j]));
         }
@@ -677,7 +677,7 @@ int main(int argc, char** argv) {
         #endif
         end_clock = clock();
         execution_clocks = end_clock - start_clock;
-        cout << "vector contruction execution clocks: " << execution_clocks << endl;
+        std::cout << "vector contruction execution clocks: " << execution_clocks << std::endl;
     #endif
     }
     #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
@@ -685,24 +685,23 @@ int main(int argc, char** argv) {
     std::sort(results.begin(), results.end(), sort_by_score);
     end_clock = clock();
     execution_clocks = end_clock - start_clock;
-    cout << "sort execution clocks: " << execution_clocks << endl;
+    std::cout << "sort execution clocks: " << execution_clocks << std::endl;
     int results_size = results.size(); // in SHOW_RESULT MODE it equals num_target_strs * num_query_strs
     for (int i = 0; i < min(results_size, BENCH_CAP_VAL); i++) {
         std::tuple<std::string, std::string, int> t = results[i];
-        cout << get<0>(t) << " " << get<1>(t) << " " << get<2>(t) << endl;
+        std::cout << std::get<0>(t) << " " << std::get<1>(t) << " " << std::get<2>(t) << std::endl;
     }
     // todo: this is hardcode! (chrono and ctime are needed and are included in bits/stc++)
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
     std::ostringstream oss_time;
     oss_time << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S_");
-    string out_name = "PlayGround_/full_output_" + oss_time.str() + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
+    std::string out_name = "PlayGround_/full_output_" + oss_time.str() + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
     debug(out_name);
-    ofstream out_file(out_name);
+    std::ofstream out_file(out_name);
     for (int i = 0; i < results_size; i++) {
         std::tuple<std::string, std::string, int> tuple = results[i];
-        std::string sep = "|";
-        out_file << split(get<0>(tuple), sep)[2] << " " << split(get<1>(tuple), sep)[2] << " " << get<2>(tuple) << endl;
+        out_file << std::get<0>(tuple) << " " << std::get<1>(tuple) << " " << std::get<2>(tuple) << std::endl;
     }
     #endif
     cudaFree(scores_ret);
