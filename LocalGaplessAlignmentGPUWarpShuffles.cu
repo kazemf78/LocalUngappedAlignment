@@ -11,7 +11,7 @@ namespace cg = cooperative_groups;
 #define WARP_SIZE 32
 #define debug(A) std::cout << #A << ": " << A << std::endl
 #define ull unsigned long long
-#define BENCH_CAP_VAL 200
+#define BENCH_CAP_VAL 2000
 
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
