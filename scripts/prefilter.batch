@@ -1,0 +1,58 @@
+#!/bin/bash
+#SBATCH -A all
+#SBATCH -p medium
+#SBATCH -t 1:00:00
+#SBATCH -o /home/mpg01/MBPC/m.faghihkhorasani/tmpoutput8_1_3e6.log
+#SBATCH -c 8
+# the line above detemines number of cpus to be used
+
+
+module purge
+module load cuda/11.2.2
+# module load mmseqs2/11-e1a1c
+# the line above detemines local or cluster installation usage
+
+query="$HOME/data/bulk_query.fasta"
+targets="$HOME/data/afdb_proteome.fasta"
+
+#query="$HOME/data/bench_one_query.fasta"
+#targets="$HOME/mmseqs2-benchmark-pub/db/targetannotation.fasta"
+
+which mmseqs
+
+
+if [ ! -z $1 ]
+  then
+    query=$1
+    if [ ! -z $2 ]
+    then
+      targets=$2
+    fi
+fi
+
+wc -l $targets $query
+q_num_seqs=$(( $(wc -l $query | awk '{print $1}') / 2 ))
+t_num_seqs=$(( $(wc -l $targets | awk '{print $1}') / 2 ))
+
+# echo $suffix
+if [ -z "$suffix" ]; then suffix="3"; fi
+if [ -z "$cp" ]; then cp="1"; fi
+
+qDB="queryDB$suffix"
+tDB="targetDB$suffix"
+ungappedDB="ungappedResDB$suffix"
+prefilterDB="prefilterResDB$suffix"
+tsvfile="${suffix}_${q_num_seqs}x${t_num_seqs}.tsv"
+
+mmseqs createdb "$query" "$qDB"
+mmseqs createdb "$targets" "$tDB"
+
+# mmseqs ungappedprefilter "$qDB" "$tDB" "$ungappedDB" -v 3 -e 10000000 --max-seqs 200
+
+# mmseqs ungappedprefilter "$qDB" "$tDB" "$ungappedDB" -v 3 -e 10000000 --max-seqs 200 --comp-bias-corr 0 --threads "$cp"
+mmseqs prefilter "$qDB" "$tDB" "$prefilterDB" -v 3 --max-seqs 200 --comp-bias-corr 0 --threads "$cp"
+
+
+# mmseqs createtsv "$qDB" "$tDB" "$ungappedDB" "ungapped_$tsvfile"
+mmseqs createtsv "$qDB" "$tDB" "$prefilterDB" "$prefilter_$tsvfile"
+
