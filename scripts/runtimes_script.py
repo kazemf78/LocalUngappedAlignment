@@ -11,14 +11,15 @@ from datetime import timedelta, datetime
 import pandas as pd
 import glob
 import sys
+import pathlib
 
 
 # In[2]:
-
+basep = '/home/mpg01/MBPC/m.faghihkhorasani'
 if len(sys.argv) > 2:
     suffix = sys.argv[1]
 else:
-    filepath = "~/logtmp2/*cores=8*-*-v=*.log"
+    filepath = f'{basep}/logtmp/*cores=*-1-*-v=*.log'
 search_query = 'Time for processing:'
 
 
@@ -30,7 +31,7 @@ print("filepath:", filepath, '\n', files)
 all_runtimes = []
 row_labels = []
 for file in files:
-    row_labels.append('_'.join(file.split('-')[1:]))
+    row_labels.append('_'.join(pathlib.PurePath(file).name.split('-')[1:-2]))
     res = subprocess.run(shlex.split(f'grep "{search_query}" {file}'), check=True, text=True, stdout=subprocess.PIPE)
     proc_times = res.stdout.replace(search_query, "").splitlines()
     deltas = []
@@ -54,7 +55,7 @@ for file in files:
 
     deltas.append(total_delta)
     all_runtimes.append([d.total_seconds() for d in deltas])
-    labels = ["createdb_query", "createdb_target", "prefilter", "createtsv", "total"]
+labels = ["createdb_query", "createdb_target", "prefilter", "createtsv", "total"]
 
 
 # In[20]:
