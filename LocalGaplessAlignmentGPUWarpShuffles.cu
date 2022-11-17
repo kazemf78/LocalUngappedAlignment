@@ -490,11 +490,19 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
     int num_target_strs = targets.size();
 
     // allocate and initialize some necessary variables on device for kernel call
+    clock_t start_clock, end_clock, s1, s2, s3, s4;
+    long execution_clocks;
+    start_clock = clock();
     char * d_query_str_idx; char * d_targets_fstr; int * d_target_indices; int_type *best_scores;
     cudaMalloc(&d_query_str_idx, q_len * sizeof(char));
     cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
     allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
     cudaMallocManaged(&best_scores, num_target_strs * sizeof(int_type));
+    end_clock = clock();
+    execution_clocks = end_clock - start_clock;
+    #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        std::cout << "global memory transaction clocks: " << execution_clocks << std::endl;
+    #endif
     int global_memory_size = q_len + sizeof(char)
     + sum_target_len * sizeof(char)
     + (num_target_strs + 1) * sizeof(int)
@@ -515,6 +523,7 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
     // calculating the maximum needed shared-memory size in bytes
     int shared_memory_size;
     int block_size;
+    s1 = clock();
     if (on_columns) {
         block_size = min(q_len, MAX_LEN);
         opt_cells_size = (block_size + WARP_SIZE - 1) / WARP_SIZE;
@@ -558,11 +567,13 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
             best_scores
         );
     }
+    s2 = clock();
 #if defined SHOW_KERNEL_CONF // && !defined BENCHMARK
     printf("global_memory_size: %d, shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", global_memory_size, shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
 #endif
     gpuErrchk(cudaPeekAtLastError());
     gpuErrchk(cudaDeviceSynchronize());
+    s3 = clock();
 #if defined BENCHMARK
     *scores_to_return_addr = best_scores;
     #if defined DEBUG_BENCH
@@ -583,6 +594,10 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
 #if !defined BENCHMARK
     cudaFree(best_scores);
 #endif
+    s4 = clock();
+    #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        printf("kernel steps clocks; gpu_kernel: %lld, cuda_sync: %lld, log+free: %lld\n", (s2 - s1), (s3 - s2), (s4 - s3));
+    #endif
 }
 
 void measure_kernel_time(const std::string query, const std::vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
