@@ -12,6 +12,7 @@ namespace cg = cooperative_groups;
 #define debug(A) std::cout << #A << ": " << A << std::endl
 #define ull unsigned long long
 #define BENCH_CAP_VAL 2000
+#define PREFILTER_SCORE_THRESHOLD 60
 
 // #define DEBUG_REDUCE
 // #define DEBUG_KERNEL
@@ -24,9 +25,14 @@ namespace cg = cooperative_groups;
 // #define HANDLE_LONG_QUERY
 // #define REDUCE_ALIGNMENT_RESULT
 // #define BENCHMARK
+// #define BENCHMARK_MULTI
 // #define DEBUG_BENCH
 // #define SORT_RESULTS
 // #define SORT_RESULTS_LIMITED
+
+#ifdef BENCHMARK_MULTI
+    #define BENCHMARK
+#endif
 
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=true)
@@ -42,6 +48,14 @@ inline void gpuAssert(cudaError_t code, const char *file, int line, bool abort=t
 extern __shared__ int shared_memory[];
 
 __constant__ byte_type _score_matrix[ALPH_SIZE * ALPH_SIZE];
+
+// bool sort_by_score(const std::tuple<std::string, std::string, int>& a, const std::tuple<std::string, std::string, int>& b) {
+//     return (std::get<2>(a) > std::get<2>(b));
+// }
+
+bool sort_by_score(const std::tuple<int, int, int>& a, const std::tuple<int, int, int>& b) {
+    return (std::get<2>(a) > std::get<2>(b));
+}
 
 void allcoate_strings_on_device_flattened(const std::vector<std::string>& strings, char ** d_fstr_addr, int ** d_fids_addr, int num_strs) {
     std::string flat_temp; int* flat_ids; char * flat_str;
@@ -578,7 +592,7 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
     *scores_to_return_addr = best_scores;
     #if defined DEBUG_BENCH
     for (int i = 0; i < num_target_strs; i++) {
-        cout << query << " " << targets[i] << " " << best_scores[i] << endl;
+        std::cout << query << " " << targets[i] << " " << best_scores[i] << std::endl;
     }
     #endif
 #elif defined SHOW_ALIGNMENT_SCORES
@@ -596,8 +610,239 @@ void call_kernel(const std::string query, const std::vector<std::string>& target
 #endif
     s4 = clock();
     #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
-        printf("kernel steps clocks; gpu_kernel: %lld, cuda_sync: %lld, log+free: %lld\n", (s2 - s1), (s3 - s2), (s4 - s3));
+        printf("kernel steps clocks; gpu_kernel: %ld, cuda_sync: %ld, log+free: %ld\n", (s2 - s1), (s3 - s2), (s4 - s3));
     #endif
+}
+
+void call_kernel_multiple_queries(const std::vector<std::string>& queries, const std::vector<std::string>& targets, const std::vector<std::string>& query_ids, const std::vector<std::string>& target_ids, bool on_columns=true) {
+
+/* some todos for more efficiency:
+    - merge minor memory transactions
+    - use pinned memory
+    - clean up more if possible!
+*/
+    int max_target_len = 0;
+    int sum_target_len = 0;
+    for (auto &t: targets) {
+        int temp_len = t.size();
+        max_target_len = max(max_target_len, temp_len);
+        sum_target_len += temp_len;
+    }
+    int num_target_strs = targets.size();
+    int num_query_strs = queries.size();
+
+    // allocate and initialize some necessary variables on device for kernel call
+    clock_t start_clock, end_clock, s1, s2, s3, s4, ss, ee;
+    long execution_clocks;
+    start_clock = clock();
+    ss = clock();
+    char * d_targets_fstr; int * d_target_indices; int_type *best_scores;
+    allcoate_strings_on_device_flattened(targets, &d_targets_fstr, &d_target_indices, num_target_strs);
+    cudaMallocManaged(&best_scores, num_target_strs * sizeof(int_type));
+    end_clock = clock();
+    execution_clocks = end_clock - start_clock;
+    #if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        std::cout << "global memory transaction clocks: " << execution_clocks << std::endl;
+    #endif
+    // int global_memory_size = q_len + sizeof(char)
+    int global_memory_size = 0
+    + sum_target_len * sizeof(char)
+    + (num_target_strs + 1) * sizeof(int)
+    + num_target_strs * sizeof(int_type)
+    ;
+    // todo: do sth if memory_size exceeds global_memory and improve this next log!
+    printf("total_global_memory: %llu\n", total_global_memory(0));
+    // be sure to have called init_score_matrix() before using score matrix
+    // todo: do sth about this init_score_matrix necessity
+    cudaMemcpyToSymbol(_score_matrix, score_matrix_flattened, SCORE_MATRIX_SIZE * sizeof(byte_type));
+
+    // std::vector<std::tuple<std::string, std::string, int>> results;
+    std::vector<std::tuple<int, int, int>> results;
+    for (int k = 0; k < queries.size(); k++) {
+        std::string query = queries[k];
+        // std::cout << query << std::endl;
+        char * q_str = (char *) query.c_str();
+        int q_len = query.size();
+        // convert query to its indexes on aa2num
+        char * q_str_idx = (char *)malloc(q_len * sizeof(char));
+        for (int i = 0; i < q_len; i++) {
+            q_str_idx[i] = (char)aa2num[q_str[i] - 'A'];
+        }
+        char * d_query_str_idx;
+        cudaMalloc(&d_query_str_idx, q_len * sizeof(char));
+        cudaMemcpy(d_query_str_idx, q_str_idx, q_len * sizeof(char), cudaMemcpyHostToDevice);
+
+        // calculating the (maximum) size of different variables which will go on shared-memory
+        // also a future todo: remove this score_matrix_len from argument list of kernel functions
+        // int score_matrix_len = SCORE_MATRIX_SIZE;
+        int rows_memory_len = 2 * (q_len + 1); // current row + last row
+        int q_tmax_len = (max_target_len + q_len);
+        int opt_cells_size;
+        // calculating the maximum needed shared-memory size in bytes
+        int shared_memory_size;
+        int block_size;
+        s1 = clock();
+        if (on_columns) {
+            block_size = min(q_len, MAX_LEN);
+            opt_cells_size = (block_size + WARP_SIZE - 1) / WARP_SIZE;
+            shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
+            + rows_memory_len * sizeof(int_type)
+            + q_tmax_len  * sizeof(char)
+            + opt_cells_size * sizeof(opt_cell)
+            ;
+
+            local_ungapped_alignment<<<num_target_strs, block_size, shared_memory_size>>> (
+                SCORE_MATRIX_SIZE,
+                rows_memory_len,
+                q_tmax_len,
+                opt_cells_size,
+                d_targets_fstr,
+                d_target_indices,
+                d_query_str_idx,
+                q_len,
+                best_scores
+            );
+        } else {
+            block_size = min(max(max_target_len, q_len), MAX_LEN);
+            opt_cells_size = (block_size + WARP_SIZE - 1) / WARP_SIZE;
+
+            shared_memory_size = SCORE_MATRIX_SIZE  * sizeof(byte_type)
+            + q_tmax_len  * sizeof(char)
+#ifdef REDUCE_ALIGNMENT_RESULT
+            + opt_cells_size * sizeof(opt_cell)
+#endif
+            ;
+            local_ungapped_alignment_on_diagonal<<<num_target_strs, block_size, shared_memory_size>>> (
+                SCORE_MATRIX_SIZE,
+                q_tmax_len,
+#ifdef REDUCE_ALIGNMENT_RESULT
+                opt_cells_size,
+#endif
+                d_targets_fstr,
+                d_target_indices,
+                d_query_str_idx,
+                q_len,
+                best_scores
+            );
+        }
+        s2 = clock();
+#if defined SHOW_KERNEL_CONF // && !defined BENCHMARK
+        printf("global_memory_size: %d, shared_memory_size: %d, num_targets=grid_size: %d, block_size: %d, q_len: %d, max_t_len: %d, mode: %s\n", global_memory_size, shared_memory_size, num_target_strs, block_size, q_len, max_target_len, on_columns?"on_columns":"on_diagonals");
+#endif
+        gpuErrchk(cudaPeekAtLastError());
+        gpuErrchk(cudaDeviceSynchronize());
+        s3 = clock();
+#if defined BENCHMARK
+    // *scores_to_return_addr = best_scores;
+    #if defined DEBUG_BENCH
+        for (int i = 0; i < num_target_strs; i++) {
+            std::cout << query_ids[k] << " " << target_ids[i] << " " << best_scores[i] << std::endl;
+        }
+    #endif
+#elif defined SHOW_ALIGNMENT_SCORES
+        std::cout << "final scores:" << std::endl;
+        for (int i = 0; i < num_target_strs; i++) {
+            std::cout << query.substr(0, 10) << "," << targets[i].substr(0, 10);
+            printf("(%4d,%4d): %4d\n", q_len, (int)targets[i].size(), best_scores[i]);
+        }
+#endif
+        cudaFree(d_query_str_idx);
+        s4 = clock();
+#if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        printf("kernel steps clocks; gpu_kernel: %ld, cuda_sync: %ld, log+free: %ld\n", (s2 - s1), (s3 - s2), (s4 - s3));
+#endif
+
+
+#if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+        start_clock = clock();
+    #if defined SORT_RESULTS
+        for (int j = 0; j < num_target_strs; j++) {
+            // results.push_back(std::forward_as_tuple(query_ids[k], target_ids[j], best_scores[j]));
+            results.push_back(std::forward_as_tuple(k, j, best_scores[j]));
+        }
+    #else
+        int idx[num_target_strs];
+        int ptr = 0;
+        clock_t s11, s22, s33, s44;
+        // clock_t s11, s22, s33, s44, s55;
+        s11 = clock();
+        for (int j = 0; j < num_target_strs; j++) {
+            if (best_scores[j] > PREFILTER_SCORE_THRESHOLD) {
+                idx[ptr++] = j;
+            }
+        }
+        s22 = clock();
+        // std::sort(idx, idx+ptr, [&](const int& a, const int& b) -> bool
+        std::sort(idx, idx+ptr, [=](const int& a, const int& b) -> bool
+            {return best_scores[a] > best_scores[b]; }
+        );
+        s33 = clock();
+        for (int j = 0, lim = min(ptr, BENCH_CAP_VAL); j < lim; j++) {
+            results.push_back(std::forward_as_tuple(k, idx[j], best_scores[idx[j]]));
+        }
+        s44 = clock();
+        // std::sort(best_scores, best_scores+ptr, std::greater<int>());
+        // s55 = clock();
+        printf("filter and idx construction clocks: %ld, its sorting: %ld, grabbing the fixed amount: %ld\n", (s22 - s11), (s33 - s22), (s44 - s33));
+        // printf("filter and idx construction clocks: %ld, its sorting: %ld, grabbing the fixed amount: %ld, original sorting: %ld\n", (s22 - s11), (s33 - s22), (s44 - s33), (s55 - s44));
+        // std::vector<std::tuple<std::string, std::string, int>> results_tmp;
+        // std::vector<std::tuple<int, int, int>> results_tmp;
+        // for (int j = 0; j < num_target_strs; j++) {
+        //     // results_tmp.push_back(std::forward_as_tuple(query_ids[k], target_ids[j], best_scores[j]));
+        //     results_tmp.push_back(std::forward_as_tuple(k, j, best_scores[j]));
+        // }
+        // std::sort(results_tmp.begin(), results_tmp.end(), sort_by_score);
+        // for (int j = 0; j < min(num_target_strs, BENCH_CAP_VAL); j++) {
+        //     results.push_back(results_tmp[j]);
+        // }
+    #endif
+        end_clock = clock();
+        execution_clocks = end_clock - start_clock;
+        std::cout << "vector contruction execution clocks: " << execution_clocks << ", elements_num: " << ptr << std::endl;
+#endif
+    }
+
+#if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+    start_clock = clock();
+    std::sort(results.begin(), results.end(), sort_by_score);
+    end_clock = clock();
+    execution_clocks = end_clock - start_clock;
+    std::cout << "sort execution clocks: " << execution_clocks << std::endl;
+    ee = clock();
+#if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+    printf("total runtime of gpu search: %ld\n", (ee - ss));
+#endif
+    ss = clock();
+    int results_size = results.size(); // in SHOW_RESULT MODE it equals num_target_strs * num_query_strs
+    for (int i = 0; i < min(results_size, BENCH_CAP_VAL); i++) {
+        // std::tuple<std::string, std::string, int> t = results[i];
+        std::tuple<int, int, int> t = results[i];
+        // std::cout << std::get<0>(t) << " " << std::get<1>(t) << " " << std::get<2>(t) << std::endl;
+        std::cout << query_ids[std::get<0>(t)] << " " << target_ids[std::get<1>(t)] << " " << std::get<2>(t) << std::endl;
+    }
+    // todo: this is hardcode! (chrono and ctime are needed and are included in bits/stc++)
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    std::ostringstream oss_time;
+    oss_time << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S_");
+    std::string out_name = "PlayGround_/full_output_" + oss_time.str() + std::to_string(num_query_strs) + "_" + std::to_string(num_target_strs);
+    debug(out_name);
+    std::ofstream out_file(out_name);
+    for (int i = 0; i < results_size; i++) {
+        // std::tuple<std::string, std::string, int> tuple = results[i];
+        std::tuple<int, int, int> tuple = results[i];
+        out_file << query_ids[std::get<0>(tuple)] << " " << target_ids[std::get<1>(tuple)] << " " << std::get<2>(tuple) << std::endl;
+    }
+#endif
+    // freeing device memory
+    free_strings_on_device_flattened(d_targets_fstr, d_target_indices);
+#if !defined BENCHMARK
+    cudaFree(best_scores);
+#endif
+    ee = clock();
+#if defined DEBUG && ( defined SORT_RESULTS || defined SORT_RESULTS_LIMITED )
+    printf("clocks for outputting results: %ld\n", (ee - ss));
+#endif
 }
 
 void measure_kernel_time(const std::string query, const std::vector<std::string>& targets, bool on_columns=true, bool verbose=true, int number_of_calls=20) {
@@ -617,10 +862,6 @@ void measure_kernel_time(const std::string query, const std::vector<std::string>
         if (verbose) std::cout << "execution clocks: " << execution_clocks << std::endl; // divide by CLOCKS_PER_SEC if actual time is needed
     }
     debug(maximum_clocks); debug(minimum_clocks); std::cout << "avg_clocks: " << sum_clocks / number_of_calls << std::endl;
-}
-
-bool sort_by_score(const std::tuple<std::string, std::string, int>& a, const std::tuple<std::string, std::string, int>& b) {
-    return (std::get<2>(a) > std::get<2>(b));
 }
 
 int main(int argc, char** argv) {
@@ -661,7 +902,9 @@ int main(int argc, char** argv) {
     init_input_from_file(target_path, targets, is_target_fasta);
 #endif
 
-#if defined BENCHMARK
+#if defined BENCHMARK_MULTI
+    call_kernel_multiple_queries(queries, targets, query_ids, target_ids, on_columns);
+#elif defined BENCHMARK
     int_type* scores_ret;
     int num_target_strs = targets.size();
     int num_query_strs = queries.size();
