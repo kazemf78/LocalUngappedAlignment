@@ -12,6 +12,7 @@ mynvcc="nvcc $nvcc_flags_general"
 sup_files="Utils.cpp ScoreMatrix.cpp"
 cpp_main_file="LocalGaplessAlignmentCPU.cpp"
 cu_main_file="LocalGaplessAlignmentGPUWarpShuffles.cu"
+cu_main_file="LocalGaplessPrefilterGPU.cu"
 # files="LocalGaplessAlignmentGPU.cu Utils.cpp ScoreMatrix.cpp"
 flags="-lineinfo -std=c++11 -Wno-deprecated-gpu-targets" # suppress warning for deprecation of 35, 37, 50 versions
 obj_file="exe_$gpu_model.out"
@@ -35,7 +36,7 @@ base_command="nvcc {nvcc_flags} $cu_main_file $sup_files $flags {sup_flags} -o $
 echo "BASE_COMMAND: $base_command"
 
 echo "Time: $(date +"%Y-%m-%d_%H-%M-%S")"
-sup_flags=("-DBENCHMARK -DDEBUG -DSORT_RESULTS_LIMITED")
+sup_flags=("-DBENCHMARK_MULTI -DDEBUG -DSORT_RESULTS_LIMITED")
 # sup_flags=("-DHANDLE_LONG_SEQUENCE")
 # if [ ! -z "$4" ] && [ "$4" = "0" ]; then sup_flags=("" "-DHANDLE_LONG_SEQUENCE"); fi
 

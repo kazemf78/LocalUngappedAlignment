@@ -3,6 +3,7 @@
 // #endif
 
 #define int_type unsigned short
+#define MAX_SCORE UINT16_MAX
 #define byte_type char
 
 // using namespace std;
